@@ -40,8 +40,8 @@ from .session_json import (
 log = logging.getLogger("btw.live")
 
 # Keep spoken injects short — long TTS blocks the mic
-AUDIO_BRIEF_MAX = 900
-AUDIO_TOPUP_MAX = 700
+AUDIO_BRIEF_MAX = 320
+AUDIO_TOPUP_MAX = 280
 
 
 def _log(msg: str) -> None:
@@ -76,9 +76,8 @@ def spoken_bootstrap(instructions: str, context: str = "") -> str:
             "session. You cannot edit files. Wait for the user."
         )
     return (
-        "BTW V C session brief. You are a voice advisor for Grok Build. "
-        "You cannot edit files. Remember this context for the whole call. "
-        f"{body}"
+        "Session brief. Voice advisor for Grok Build. Cannot edit files. "
+        f"Context: {body}"
     )
 
 
@@ -151,6 +150,19 @@ class LiveSession:
                 "context_chars": len(self.context or ""),
                 "dc_open": bool(self.stats.get("dc_open")),
                 "audio_injects": self.stats.get("audio_injects", 0),
+                "uplink_peak": (
+                    float(getattr(self.mic_track, "last_peak", 0.0) or 0.0)
+                    if self.mic_track
+                    else 0.0
+                ),
+                "uplink_src": (
+                    getattr(self.mic_track, "_source", None) if self.mic_track else None
+                ),
+                "mic_frames": (
+                    int(getattr(self.mic_track, "mic_frames", 0) or 0)
+                    if self.mic_track
+                    else 0
+                ),
             }
         )
 
@@ -436,6 +448,7 @@ class LiveSession:
         return self.stats
 
     async def _control_loop(self) -> None:
+        ticks = 0
         while not self._closed.is_set() and not self._stop_requested:
             for rec in drain_commands():
                 cmd = (rec.get("cmd") or "").lower()
@@ -459,6 +472,10 @@ class LiveSession:
                     self.push_context_live(delta, full_context=full)
                 elif cmd == "set_muted":
                     self.set_muted(bool(rec.get("muted")))
+            ticks += 1
+            # refresh uplink peak for status ~every 2s
+            if ticks % 8 == 0:
+                self._publish_status()
             await asyncio.sleep(0.25)
 
     async def run_until_stopped(self, seconds: Optional[float] = None) -> dict[str, Any]:

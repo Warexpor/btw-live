@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.11 — 2026-07-20
+
+### Fixed
+
+- Mic uplink after bootstrap: resync mic clock when inject ends; robust int16→float conversion; cap TTS inject at 8s; shorter spoken brief.
+- Live status reports `uplink_peak` / `mic_frames` for “can she hear me” checks.
+
 ## 0.5.10 — 2026-07-20
 
 ### Fixed

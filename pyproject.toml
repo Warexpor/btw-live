@@ -1,6 +1,6 @@
 [project]
 name = "btw-live"
-version = "0.5.10"
+version = "0.5.11"
 description = "ChatGPT Live /btw side session for Grok Build (standalone)"
 readme = "README.md"
 requires-python = ">=3.10"

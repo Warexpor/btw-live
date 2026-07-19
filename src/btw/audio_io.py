@@ -169,6 +169,14 @@ class MicrophoneTrack(MediaStreamTrack):
         )
         self._stream.start()
 
+    def resync_clock(self) -> None:
+        """Reset pacing after a long inject so we don't dump/starve frames."""
+        self._started = time.monotonic()
+        self._pts = 0
+        self._pending = np.zeros(0, dtype=np.float32)
+        # drop stale buffered audio; take live from now
+        self._ring = _FloatRing(SAMPLE_RATE * RING_SECONDS)
+
     def _resample_to_48k(self, mono: np.ndarray, src_rate: int) -> np.ndarray:
         if src_rate == SAMPLE_RATE or mono.size == 0:
             return mono
@@ -418,8 +426,12 @@ def _load_wav_mono_48k(wav_path: str | Path) -> np.ndarray:
     return np.clip(pcm, -1.0, 1.0).astype(np.float32)
 
 
+# Cap TTS inject so mic is not blocked for 20s of SAPI
+INJECT_MAX_SAMPLES = SAMPLE_RATE * 8  # 8s
+
+
 class InjectableUplinkTrack(MediaStreamTrack):
-    """Uplink: inject queue (context TTS) then live mic/silence.
+    """Uplink: short inject queue (context TTS) then live mic.
 
     Wingman listens to audio; DC text inject is best-effort only.
     """
@@ -434,6 +446,12 @@ class InjectableUplinkTrack(MediaStreamTrack):
         self._inject = np.zeros(0, dtype=np.float32)
         self._lock = threading.Lock()
         self._muted_base = False
+        self._frames = 0
+        self._last_peak_log = 0.0
+        self._source = "silence"  # inject | mic | silence
+        self.last_peak = 0.0
+        self.mic_frames = 0
+        self.inject_frames = 0
 
     def set_muted(self, muted: bool) -> None:
         """Mute only the live mic base — injects still play."""
@@ -445,12 +463,16 @@ class InjectableUplinkTrack(MediaStreamTrack):
         mono = np.asarray(mono, dtype=np.float32).reshape(-1)
         if mono.size == 0:
             return 0
+        if mono.size > INJECT_MAX_SAMPLES:
+            mono = mono[:INJECT_MAX_SAMPLES]
         with self._lock:
             self._inject = (
                 np.concatenate([self._inject, mono])
                 if self._inject.size
                 else mono.copy()
             )
+            if self._inject.size > INJECT_MAX_SAMPLES:
+                self._inject = self._inject[:INJECT_MAX_SAMPLES]
             return int(self._inject.size)
 
     def inject_wav(self, wav_path: str | Path) -> int:
@@ -459,6 +481,10 @@ class InjectableUplinkTrack(MediaStreamTrack):
     def inject_queue_samples(self) -> int:
         with self._lock:
             return int(self._inject.size)
+
+    def clear_inject(self) -> None:
+        with self._lock:
+            self._inject = np.zeros(0, dtype=np.float32)
 
     def _take_inject(self, n: int) -> np.ndarray:
         with self._lock:
@@ -470,6 +496,31 @@ class InjectableUplinkTrack(MediaStreamTrack):
                 take = np.pad(take, (0, n - take.size))
             return take
 
+    def _frame_from_base(self, base_fr: AudioFrame) -> np.ndarray:
+        """Normalize any base AudioFrame to float32 mono FRAME_SAMPLES."""
+        arr = base_fr.to_ndarray()
+        if arr.ndim > 1:
+            # planar: (ch, n) or interleaved (n, ch)
+            if arr.shape[0] <= 8 and arr.shape[0] < arr.shape[-1]:
+                arr = arr.mean(axis=0)
+            else:
+                arr = arr.mean(axis=-1)
+        samples = np.asarray(arr, dtype=np.float32).reshape(-1)
+        # int PCM often arrives as int16/int32 ndarray
+        if samples.dtype == np.int16 or (
+            samples.size and float(np.max(np.abs(samples))) > 1.5
+        ):
+            peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+            if peak > 200.0:  # clearly integer PCM
+                samples = samples / (32768.0 if peak <= 32768 * 1.5 else peak)
+            elif base_fr.format and base_fr.format.name in ("s16", "s16p"):
+                samples = samples / 32768.0
+        if samples.size < FRAME_SAMPLES:
+            samples = np.pad(samples, (0, FRAME_SAMPLES - samples.size))
+        else:
+            samples = samples[:FRAME_SAMPLES]
+        return samples.astype(np.float32)
+
     async def recv(self) -> AudioFrame:
         if self.readyState != "live":
             raise MediaStreamError
@@ -479,25 +530,39 @@ class InjectableUplinkTrack(MediaStreamTrack):
         if delay > 0.001:
             await asyncio.sleep(delay)
 
+        source = "silence"
         if self.inject_queue_samples() > 0:
             samples = self._take_inject(FRAME_SAMPLES)
+            source = "inject"
+            self.inject_frames += 1
         elif self._base is not None and not self._muted_base:
             try:
+                # Realign base clock once so post-inject mic isn't stuck
+                if hasattr(self._base, "resync_clock"):
+                    if self.inject_frames and self.mic_frames == 0:
+                        self._base.resync_clock()
                 base_fr = await self._base.recv()
-                arr = base_fr.to_ndarray()
-                if arr.ndim > 1:
-                    arr = arr.mean(axis=0) if arr.shape[0] <= 8 else arr.mean(axis=-1)
-                samples = np.asarray(arr, dtype=np.float32).reshape(-1)
-                if base_fr.format.name in ("s16", "s16p"):
-                    samples = samples / 32768.0
-                if samples.size < FRAME_SAMPLES:
-                    samples = np.pad(samples, (0, FRAME_SAMPLES - samples.size))
-                else:
-                    samples = samples[:FRAME_SAMPLES]
-            except Exception:
+                samples = self._frame_from_base(base_fr)
+                source = "mic"
+                self.mic_frames += 1
+            except Exception as e:
                 samples = np.zeros(FRAME_SAMPLES, dtype=np.float32)
+                source = f"mic_err:{type(e).__name__}"
         else:
             samples = np.zeros(FRAME_SAMPLES, dtype=np.float32)
+
+        self._source = source
+        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+        self.last_peak = peak
+        self._frames += 1
+        now = time.monotonic()
+        if now - self._last_peak_log >= 2.0:
+            self._last_peak_log = now
+            print(
+                f"uplink: src={source} peak={peak:.3f} "
+                f"mic_frames={self.mic_frames} inject_q={self.inject_queue_samples()}",
+                flush=True,
+            )
 
         pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
         frame = AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
