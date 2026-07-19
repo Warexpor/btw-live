@@ -257,16 +257,18 @@ def start_background(
     if seconds is not None:
         cmd.extend(["--seconds", str(seconds)])
 
+    # Open log in child via redirection; never inherit MCP stdin (hangs on Windows).
     logf = log_path().open("a", encoding="utf-8", buffering=1)
     if sys.platform == "win32":
         # DETACHED_PROCESS (0x8) hangs child on Windows (~5MB, no log).
-        # CREATE_NO_WINDOW keeps redirected stdout working for runtime.log.
+        # CREATE_NO_WINDOW + DEVNULL stdin keeps redirected stdout working.
         CREATE_NEW_PROCESS_GROUP = 0x00000200
         CREATE_NO_WINDOW = 0x08000000
         proc = subprocess.Popen(
             cmd,
             cwd=str(plugin_root()),
             env=env,
+            stdin=subprocess.DEVNULL,
             stdout=logf,
             stderr=subprocess.STDOUT,
             creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
@@ -277,10 +279,16 @@ def start_background(
             cmd,
             cwd=str(plugin_root()),
             env=env,
+            stdin=subprocess.DEVNULL,
             stdout=logf,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+    try:
+        logf.write(f"\n--- spawn pid={proc.pid} py={py} ---\n")
+        logf.flush()
+    except Exception:
+        pass
     pid_path().write_text(str(proc.pid), encoding="utf-8")
     st = load_state()
     st.status = "starting"

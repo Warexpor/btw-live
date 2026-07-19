@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.10 — 2026-07-20
+
+### Fixed
+
+- Background Live spawn hung (~5MB, no log) when started from MCP: inherit stdin blocked the child. Spawn with `stdin=DEVNULL`.
+
 ## 0.5.9 — 2026-07-20
 
 ### Fixed
