@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""Stdio MCP server for btw-vc."""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from btw import service  # noqa: E402
+from btw.version import __version__  # noqa: E402
+
+
+def respond(msg_id, result=None, error=None):
+    body = {"jsonrpc": "2.0", "id": msg_id}
+    if error is not None:
+        body["error"] = error
+    else:
+        body["result"] = result
+    sys.stdout.write(json.dumps(body) + "\n")
+    sys.stdout.flush()
+
+
+def _ok(result: dict) -> dict:
+    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+
+def _err(msg: str) -> dict:
+    return {"isError": True, "content": [{"type": "text", "text": msg}]}
+
+
+TOOLS = [
+    {
+        "name": "btw_status",
+        "description": "Status: active session, muted, live runtime, cookies.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_doctor",
+        "description": "Diagnose btw-vc install and auth.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_session_list",
+        "description": "List named voice sessions (profile + context packs).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_session_new",
+        "description": "Create a named voice session and make it active.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "profile": {"type": "string"},
+                "context": {"type": "string"},
+                "voice": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "btw_session_use",
+        "description": "Switch active voice session by id or name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id_or_name": {"type": "string"}},
+            "required": ["id_or_name"],
+        },
+    },
+    {
+        "name": "btw_session_delete",
+        "description": "Delete a voice session by id or name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id_or_name": {"type": "string"}},
+            "required": ["id_or_name"],
+        },
+    },
+    {
+        "name": "btw_set_profile",
+        "description": "Set profile on active session (default|debugger|architect).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "btw_list_voices",
+        "description": "List available Live speak voices and current effective voice.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_set_voice",
+        "description": "Set speak voice on active session (e.g. maple, sol, sage). Applies on next start.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"voice": {"type": "string"}},
+            "required": ["voice"],
+        },
+    },
+    {
+        "name": "btw_push_context",
+        "description": "Set context pack on active session (btw-style). If live, also inject over DC.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"context": {"type": "string"}},
+            "required": ["context"],
+        },
+    },
+    {
+        "name": "btw_preview_instructions",
+        "description": "Preview assembled system+context instructions and explain injection.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "profile": {"type": "string"},
+                "context": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "btw_start",
+        "description": "Start /btw-vc Live voice for the active session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "profile": {"type": "string"},
+                "context": {"type": "string"},
+                "use_mic": {"type": "boolean"},
+                "muted": {"type": "boolean"},
+            },
+        },
+    },
+    {
+        "name": "btw_stop",
+        "description": "Stop Live voice runtime.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_mute",
+        "description": "Mute microphone (live or next start).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_unmute",
+        "description": "Unmute microphone.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_reinject",
+        "description": "Re-send system/context instructions on open datachannel.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_import_cookies",
+        "description": "Swap chatgpt.com Cookie header (new account). Clears token cache. Stop Live first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"cookie_header": {"type": "string"}},
+            "required": ["cookie_header"],
+        },
+    },
+    {
+        "name": "btw_clear_cookies",
+        "description": "Remove stored ChatGPT cookies and token cache (local logout).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+
+def handle_tool(name: str, args: dict) -> dict:
+    try:
+        if name == "btw_status":
+            return _ok(service.status())
+        if name == "btw_doctor":
+            return _ok(service.doctor())
+        if name == "btw_session_list":
+            return _ok(service.session_list())
+        if name == "btw_session_new":
+            return _ok(
+                service.session_new(
+                    args["name"],
+                    profile=args.get("profile") or "default",
+                    context=args.get("context") or "",
+                    voice=args.get("voice") or "",
+                )
+            )
+        if name == "btw_list_voices":
+            return _ok(service.list_tts_voices())
+        if name == "btw_set_voice":
+            return _ok(service.set_voice(args["voice"]))
+        if name == "btw_session_use":
+            return _ok(service.session_use(args["id_or_name"]))
+        if name == "btw_session_delete":
+            return _ok(service.session_delete(args["id_or_name"]))
+        if name == "btw_set_profile":
+            return _ok(service.set_profile(args["name"]))
+        if name == "btw_push_context":
+            return _ok(service.push_context(args.get("context") or ""))
+        if name == "btw_preview_instructions":
+            return _ok(
+                service.preview_instructions(
+                    profile=args.get("profile"),
+                    context=args.get("context"),
+                )
+            )
+        if name == "btw_start":
+            return _ok(
+                service.start(
+                    profile=args.get("profile"),
+                    context=args.get("context"),
+                    use_mic=args.get("use_mic", True) is not False,
+                    muted=bool(args.get("muted") or False),
+                )
+            )
+        if name == "btw_stop":
+            return _ok(service.stop())
+        if name == "btw_mute":
+            return _ok(service.mute())
+        if name == "btw_unmute":
+            return _ok(service.unmute())
+        if name == "btw_reinject":
+            return _ok(service.reinject())
+        if name == "btw_import_cookies":
+            return _ok(service.import_cookies(args["cookie_header"]))
+        if name == "btw_clear_cookies":
+            return _ok(service.clear_cookies())
+        return _err(f"unknown tool {name}")
+    except Exception as e:
+        return _err(f"{type(e).__name__}: {e}")
+
+
+def main() -> int:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        method = req.get("method")
+        msg_id = req.get("id")
+        params = req.get("params") or {}
+
+        if method == "initialize":
+            respond(
+                msg_id,
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "btw", "version": __version__},
+                },
+            )
+        elif method in ("notifications/initialized", "notifications/cancelled"):
+            continue
+        elif method == "tools/list":
+            respond(msg_id, {"tools": TOOLS})
+        elif method == "tools/call":
+            tname = params.get("name")
+            targs = params.get("arguments") or {}
+            respond(msg_id, handle_tool(str(tname), targs if isinstance(targs, dict) else {}))
+        elif method == "ping":
+            respond(msg_id, {})
+        else:
+            if msg_id is None:
+                continue
+            respond(msg_id, error={"code": -32601, "message": f"Method not found: {method}"})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

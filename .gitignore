@@ -1,0 +1,16 @@
+re/captures/
+re/chrome-cdp-profile/
+*.har
+*.full.json
+access_token.txt
+access_token_cache.json
+cookie_header.txt
+cookies.netscape
+cookies.full.json
+__pycache__/
+*.egg-info/
+.venv/
+*.pyc
+.env
+# never ship local plugin data
+.btw-data/

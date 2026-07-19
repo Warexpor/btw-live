@@ -1,0 +1,9 @@
+{
+  "name": "btw",
+  "version": "0.5.6",
+  "description": "ChatGPT Live voice for Grok Build via /btw-vc — standalone mint+WebRTC, profiles, context snips",
+  "author": {
+    "name": "amicu"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,31 @@
+[project]
+name = "btw-live"
+version = "0.5.6"
+description = "ChatGPT Live /btw side session for Grok Build (standalone)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.28",
+  "curl_cffi>=0.6",
+  "aiortc>=1.9",
+  "av>=12",
+  "sounddevice>=0.4",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+# only used if CF blocks curl_cffi for accessToken (token harvest, not Live UI)
+auth = ["playwright>=1.40"]
+
+[project.scripts]
+btw = "btw.runtime:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "btw": {
+      "command": "mcp/launch.cmd",
+      "args": []
+    }
+  }
+}
