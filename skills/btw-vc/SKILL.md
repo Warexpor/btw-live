@@ -12,8 +12,8 @@ Separate Live voice channel. Not the coding agent.
 1. **Profile** = system rules (`sessions/*.toml`: default / debugger / architect).
 2. **Session** = named pack: profile + context text.
 3. **Context** = short Grok facts (goal, files, errors). Stored on the active session.
-4. On **start**, assembled instructions inject over datachannel (`session.update` + bootstrap user brief).
-5. Mid-call: `btw_push_context` updates the pack and queues a live DC update.
+4. On **start**, short brief is **spoken** over the uplink (TTS). DC `session.update` is best-effort only.
+5. Mid-call: `/btw-topup` → `btw_push_context` appends pack + speaks delta (audio first).
 
 ## User phrases → tools
 
@@ -27,7 +27,7 @@ Separate Live voice channel. Not the coding agent.
 | `/btw-session-use` | `btw_session_use` |
 | `/btw-session-delete` | `btw_session_delete` |
 | `/btw-voice` | `btw_list_voices` / `btw_set_voice` |
-| push context | `btw_push_context` |
+| `/btw-topup` / push context | `btw_push_context` (append + live audio) |
 | reinject prompt | `btw_reinject` |
 | doctor | `btw_doctor` |
 

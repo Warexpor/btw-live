@@ -1,17 +1,35 @@
-"""Standalone Live session: mint + aiortc + local audio + control IPC."""
+"""Standalone Live session: mint + aiortc + local audio + control IPC.
+
+Context delivery (product):
+  Wingman does not reliably honor Realtime-style datachannel text events
+  (DC often closes; remote stays silent). Session context is delivered by
+  speaking a short brief over the uplink (TTS → InjectableUplinkTrack).
+
+  - On start: bootstrap brief from profile + full session context
+  - Mid-call: control cmd push_context / speak_context top-ups the same way
+  - DC session.update pack is still sent best-effort when the channel is open
+"""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import time
 import uuid
 from typing import Any, Callable, Optional
 
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
-from .audio_io import MicrophoneTrack, SilentTrack, SpeakerPlayer
+from .audio_io import (
+    InjectableUplinkTrack,
+    MicrophoneTrack,
+    SilentTrack,
+    SpeakerPlayer,
+    synthesize_speech_wav,
+)
 from .control import drain_commands, write_live_status
 from .http_client import ChatGPTClient
+from .paths import data_dir
 from .profiles import SessionProfile, load_profile
 from .session_json import (
     build_voice_session_payload,
@@ -21,10 +39,58 @@ from .session_json import (
 
 log = logging.getLogger("btw.live")
 
+# Keep spoken injects short — long TTS blocks the mic
+AUDIO_BRIEF_MAX = 900
+AUDIO_TOPUP_MAX = 700
+
 
 def _log(msg: str) -> None:
     log.info(msg)
     print(msg, flush=True)
+
+
+def _dc_to_text(message: Any) -> str:
+    if isinstance(message, str):
+        return message
+    if isinstance(message, (bytes, bytearray, memoryview)):
+        return bytes(message).decode("utf-8", errors="replace")
+    return repr(message)
+
+
+def _clip(text: str, limit: int) -> str:
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[:limit] + " …"
+
+
+def spoken_bootstrap(instructions: str, context: str = "") -> str:
+    """What we speak at call start so the voice agent has session ground truth."""
+    ctx = (context or "").strip()
+    ins = (instructions or "").strip()
+    body = ctx if ctx else ins
+    body = _clip(body, AUDIO_BRIEF_MAX)
+    if not body:
+        return (
+            "BTW V C session. You are a voice advisor for a Grok Build coding "
+            "session. You cannot edit files. Wait for the user."
+        )
+    return (
+        "BTW V C session brief. You are a voice advisor for Grok Build. "
+        "You cannot edit files. Remember this context for the whole call. "
+        f"{body}"
+    )
+
+
+def spoken_topup(delta: str) -> str:
+    """What we speak when context is topped up mid-call."""
+    d = _clip(delta, AUDIO_TOPUP_MAX)
+    if not d:
+        return ""
+    return (
+        "Context update. Add this to the session facts and keep prior context. "
+        f"{d}"
+    )
 
 
 class LiveSession:
@@ -39,9 +105,11 @@ class LiveSession:
         muted: bool = False,
         voice: str | None = None,
         on_dc_message: Optional[Callable[[str], None]] = None,
+        context: str = "",
     ):
         self.profile = profile
         self.instructions = instructions
+        self.context = context or ""
         self.use_mic = use_mic
         self.use_speaker = use_speaker
         self.session_name = session_name
@@ -50,17 +118,18 @@ class LiveSession:
         self.client = ChatGPTClient()
         self.pc: Optional[RTCPeerConnection] = None
         self.speaker: Optional[SpeakerPlayer] = None
-        self.mic_track = None
+        self.mic_track: Optional[InjectableUplinkTrack] = None
         self.voice_session_id = str(uuid.uuid4()).upper()
         self.stats: dict[str, Any] = {}
         self._dc = None
         self._closed = asyncio.Event()
         self._muted = bool(muted)
         self._stop_requested = False
+        self._inbox_path = data_dir() / "dc_inbox.jsonl"
 
     def set_muted(self, muted: bool) -> None:
         self._muted = bool(muted)
-        if self.mic_track is not None and hasattr(self.mic_track, "set_muted"):
+        if self.mic_track is not None:
             self.mic_track.set_muted(self._muted)
         self.stats["muted"] = self._muted
         _log(f"mic muted={self._muted}")
@@ -79,41 +148,135 @@ class LiveSession:
                 "ice": self.stats.get("ice_state"),
                 "mic": self.stats.get("mic"),
                 "instructions_chars": len(self.instructions or ""),
+                "context_chars": len(self.context or ""),
+                "dc_open": bool(self.stats.get("dc_open")),
+                "audio_injects": self.stats.get("audio_injects", 0),
             }
         )
+
+    def _append_inbox(self, direction: str, text: str, meta: dict[str, Any] | None = None) -> None:
+        rec = {"ts": time.time(), "dir": direction, "text": text[:8000], **(meta or {})}
+        try:
+            with self._inbox_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _send_events(self, channel, events: list[dict[str, Any]], tag: str) -> int:
         n = 0
         for ev in events:
             try:
-                channel.send(json.dumps(ev))
+                raw = json.dumps(ev, ensure_ascii=False)
+                channel.send(raw)
                 self.stats.setdefault("dc_events", []).append(ev.get("type"))
-                _log(f"dc_send[{tag}] {ev.get('type')}")
+                self._append_inbox("out", raw, {"tag": tag, "type": ev.get("type")})
+                _log(f"dc_send[{tag}] {ev.get('type')} bytes={len(raw)}")
                 n += 1
             except Exception as e:
                 _log(f"dc_send err: {e}")
         return n
 
-    def _send_instructions(self, channel) -> None:
-        self._send_events(channel, instruction_events(self.instructions), "boot")
+    def _boot_inject_sync(self, channel) -> None:
+        """Best-effort DC pack — often ignored; audio inject is source of truth."""
+        try:
+            if getattr(channel, "readyState", None) != "open":
+                return
+            n = self._send_events(
+                channel, instruction_events(self.instructions), "boot"
+            )
+            self.stats["boot_events"] = n
+            self.stats["dc_injection_sent"] = n > 0
+            _log(f"boot_dc sent={n} ready={getattr(channel, 'readyState', '?')}")
+        except Exception as e:
+            _log(f"boot_inject err: {e}")
+
+    def speak_text(self, text: str, *, tag: str = "speak") -> bool:
+        """Queue TTS onto the uplink so the voice agent hears it."""
+        t = (text or "").strip()
+        if not t:
+            return False
+        if self.mic_track is None:
+            _log(f"speak_text[{tag}]: no uplink track")
+            return False
+        try:
+            path = data_dir() / f"inject_{tag}.wav"
+            synthesize_speech_wav(t, path, rate=1)
+            n = self.mic_track.inject_wav(path)
+            self.stats["audio_injects"] = int(self.stats.get("audio_injects") or 0) + 1
+            self.stats["last_audio_inject"] = tag
+            self.stats["last_audio_chars"] = len(t)
+            _log(f"audio_inject[{tag}] chars={len(t)} samples={n}")
+            self._publish_status()
+            return n > 0
+        except Exception as e:
+            _log(f"audio_inject[{tag}] err: {e}")
+            return False
+
+    def speak_bootstrap(self) -> bool:
+        return self.speak_text(
+            spoken_bootstrap(self.instructions, self.context), tag="bootstrap"
+        )
+
+    def speak_context_topup(self, delta: str) -> bool:
+        return self.speak_text(spoken_topup(delta), tag="topup")
 
     def reinject_instructions(self, instructions: str | None = None) -> bool:
         if instructions is not None:
             self.instructions = instructions
+        ok_audio = self.speak_text(
+            spoken_bootstrap(self.instructions, self.context), tag="reinject"
+        )
         ch = self._dc
-        if not ch or getattr(ch, "readyState", None) != "open":
-            _log("reinject: no open datachannel")
-            return False
-        self._send_events(ch, instruction_events(self.instructions), "reinject")
-        return True
+        ok_dc = False
+        if ch and getattr(ch, "readyState", None) == "open":
+            self._send_events(ch, instruction_events(self.instructions), "reinject")
+            ok_dc = True
+        else:
+            _log("reinject: no open datachannel (audio path used)")
+        return ok_audio or ok_dc
 
-    def push_context_live(self, context: str) -> bool:
+    def push_context_live(
+        self, context_delta: str, *, full_context: str | None = None
+    ) -> bool:
+        """Top-up context mid-call: store + speak delta (+ DC best-effort)."""
+        delta = (context_delta or "").strip()
+        if full_context is not None:
+            self.context = full_context
+        elif delta:
+            if self.context.strip():
+                self.context = self.context.rstrip() + "\n\n" + delta
+            else:
+                self.context = delta
+        try:
+            self.instructions = self.profile.assemble_instructions(self.context)
+            (data_dir() / "instructions.txt").write_text(
+                self.instructions, encoding="utf-8"
+            )
+            (data_dir() / "context.txt").write_text(self.context, encoding="utf-8")
+        except Exception as e:
+            _log(f"push_context file write: {e}")
+
+        ok_audio = self.speak_context_topup(delta) if delta else False
         ch = self._dc
-        if not ch or getattr(ch, "readyState", None) != "open":
-            _log("push_context_live: no open datachannel — stored for next reinject only")
-            return False
-        self._send_events(ch, context_push_events(context), "context")
-        return True
+        ok_dc = False
+        if ch and getattr(ch, "readyState", None) == "open" and delta:
+            self._send_events(ch, context_push_events(delta), "context")
+            ok_dc = True
+        elif delta:
+            _log("push_context: DC closed — audio top-up only")
+        self._publish_status()
+        return ok_audio or ok_dc
+
+    def _handle_dc_message(self, message: Any, label: str) -> None:
+        text = _dc_to_text(message)
+        self.stats.setdefault("dc_msgs", []).append(text[:500])
+        self._append_inbox("in", text, {"label": label})
+        _log(f"dc_msg[{label}] {text[:200]}")
+        if self.on_dc_message:
+            try:
+                self.on_dc_message(text)
+            except Exception:
+                pass
 
     async def start(self) -> dict[str, Any]:
         _log(f"auth backend={self.client.backend} …")
@@ -122,9 +285,14 @@ class LiveSession:
 
         pc = RTCPeerConnection()
         self.pc = pc
-        self.stats["ice"] = []
-        self.stats["dc_events"] = []
-        self.stats["muted"] = self._muted
+        self.stats = {
+            "ice": [],
+            "dc_events": [],
+            "dc_msgs": [],
+            "muted": self._muted,
+            "audio_injects": 0,
+            "context_chars": len(self.context or ""),
+        }
 
         @pc.on("connectionstatechange")
         async def on_state():
@@ -180,19 +348,12 @@ class LiveSession:
                 _log(f"dc_open {label}")
                 self.stats["dc_open"] = True
                 self._dc = channel
-                self._send_instructions(channel)
+                self._boot_inject_sync(channel)
                 self._publish_status()
 
             @channel.on("message")
             def on_message(message):
-                text = message if isinstance(message, str) else repr(message)[:500]
-                self.stats.setdefault("dc_msgs", []).append(text[:500])
-                _log(f"dc_msg {text[:200]}")
-                if self.on_dc_message:
-                    try:
-                        self.on_dc_message(text)
-                    except Exception:
-                        pass
+                self._handle_dc_message(message, label)
 
             @channel.on("close")
             def on_close():
@@ -213,23 +374,33 @@ class LiveSession:
         except Exception as e:
             _log(f"createDataChannel failed: {e}")
 
+        base = None
         if self.use_mic:
             try:
-                self.mic_track = MicrophoneTrack()
+                base = MicrophoneTrack()
                 if self._muted:
-                    self.mic_track.set_muted(True)
-                pc.addTrack(self.mic_track)
+                    base.set_muted(True)
                 self.stats["mic"] = "microphone"
                 _log("mic: MicrophoneTrack")
             except Exception as e:
-                _log(f"mic failed ({e}); silent uplink")
-                self.mic_track = SilentTrack()
-                pc.addTrack(self.mic_track)
+                _log(f"mic failed ({e}); silent base")
+                base = SilentTrack()
                 self.stats["mic"] = "silent"
         else:
-            self.mic_track = SilentTrack()
-            pc.addTrack(self.mic_track)
+            base = SilentTrack()
             self.stats["mic"] = "silent"
+
+        self.mic_track = InjectableUplinkTrack(base=base)
+        if self._muted:
+            self.mic_track.set_muted(True)
+        pc.addTrack(self.mic_track)
+
+        if self.speak_bootstrap():
+            self.stats["bootstrap"] = True
+            _log("bootstrap audio queued for uplink")
+        else:
+            self.stats["bootstrap"] = False
+            _log("bootstrap audio failed or empty")
 
         try:
             pc.addTransceiver("video", direction="recvonly")
@@ -277,10 +448,15 @@ class LiveSession:
                     self._stop_requested = True
                     self._closed.set()
                 elif cmd == "reinject":
-                    self.reinject_instructions(rec.get("instructions"))
-                elif cmd == "push_context":
-                    ctx = rec.get("context") or ""
-                    self.push_context_live(ctx)
+                    if rec.get("instructions"):
+                        self.instructions = rec["instructions"]
+                    if rec.get("context") is not None:
+                        self.context = rec.get("context") or ""
+                    self.reinject_instructions()
+                elif cmd in ("push_context", "speak_context", "topup_context"):
+                    delta = rec.get("context") or rec.get("text") or ""
+                    full = rec.get("full_context")
+                    self.push_context_live(delta, full_context=full)
                 elif cmd == "set_muted":
                     self.set_muted(bool(rec.get("muted")))
             await asyncio.sleep(0.25)
@@ -300,7 +476,7 @@ class LiveSession:
             ctrl.cancel()
             try:
                 await ctrl
-            except Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
             await self.stop()
         return self.stats
@@ -325,7 +501,13 @@ class LiveSession:
                 pass
             self.pc = None
         self._closed.set()
-        write_live_status({"status": "stopped", "session_name": self.session_name})
+        write_live_status(
+            {
+                "status": "stopped",
+                "session_name": self.session_name,
+                "audio_injects": self.stats.get("audio_injects"),
+            }
+        )
         _log("session stopped")
 
 
@@ -337,16 +519,18 @@ async def run_live(
     seconds: Optional[float] = None,
     session_name: str = "default",
     muted: bool = False,
+    context: str = "",
 ) -> dict[str, Any]:
     prof = load_profile(profile_name)
     if not instructions:
-        instructions = prof.assemble_instructions("")
+        instructions = prof.assemble_instructions(context)
     sess = LiveSession(
         prof,
         instructions,
         use_mic=use_mic,
         session_name=session_name,
         muted=muted,
+        context=context,
     )
     await sess.start()
     return await sess.run_until_stopped(seconds=seconds)

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.8 — 2026-07-20
+
+### Added
+
+- Audio context delivery: SAPI TTS → `InjectableUplinkTrack` bootstrap on start and mid-call top-up.
+- `/btw-topup` skill — curated snip only; appends session pack; live audio inject primary path.
+- `push_context` append mode (default) so top-ups do not wipe prior facts.
+
+### Fixed
+
+- Windows `btw_start` spawn hang: drop `DETACHED_PROCESS`; use `CREATE_NO_WINDOW` + `-u` + line-buffered log.
+- Runtime passes `context.txt` into `LiveSession` so bootstrap speech has the pack.
+
+### Changed
+
+- DC `session.update` / reinject remains best-effort; product path is spoken uplink.
+
 ## 0.5.5 — 2026-07-20
 
 ### Fixed

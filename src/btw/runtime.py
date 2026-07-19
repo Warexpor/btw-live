@@ -164,6 +164,8 @@ def start_foreground(
     from .voices import normalize_voice
 
     speak = normalize_voice(voice) if voice else prof.voice
+    ctx_path = data_dir() / "context.txt"
+    context = ctx_path.read_text(encoding="utf-8") if ctx_path.is_file() else ""
 
     async def _run() -> dict[str, Any]:
         sess = LiveSession(
@@ -173,6 +175,7 @@ def start_foreground(
             muted=muted or st.muted,
             session_name=session_name or st.session_name or "default",
             voice=speak,
+            context=context,
         )
         try:
             stats = await sess.start()
@@ -218,8 +221,10 @@ def start_background(
     data_dir().mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(plugin_root() / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONUNBUFFERED"] = "1"
     cmd = [
         sys.executable,
+        "-u",
         "-m",
         "btw.runtime",
         "run",
@@ -237,17 +242,20 @@ def start_background(
     if seconds is not None:
         cmd.extend(["--seconds", str(seconds)])
 
-    logf = log_path().open("a", encoding="utf-8")
+    logf = log_path().open("a", encoding="utf-8", buffering=1)
     if sys.platform == "win32":
-        creationflags = 0x00000008 | 0x00000200
+        # DETACHED_PROCESS (0x8) hangs child on Windows (~5MB, no log).
+        # CREATE_NO_WINDOW keeps redirected stdout working for runtime.log.
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        CREATE_NO_WINDOW = 0x08000000
         proc = subprocess.Popen(
             cmd,
             cwd=str(plugin_root()),
             env=env,
             stdout=logf,
             stderr=subprocess.STDOUT,
-            creationflags=creationflags,
-            close_fds=True,
+            creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            close_fds=False,
         )
     else:
         proc = subprocess.Popen(

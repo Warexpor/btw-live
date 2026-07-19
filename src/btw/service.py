@@ -140,29 +140,47 @@ def set_profile(name: str) -> dict[str, Any]:
     return {"ok": True, "profile": name, "session": s, "profiles": list_profiles()}
 
 
-def push_context(context: str) -> dict[str, Any]:
-    """Update active session context pack (btw-style). Live: also queue DC push."""
-    s = ss.update_active(context=context or "")
+def push_context(context: str, *, append: bool = True) -> dict[str, Any]:
+    """Update active session context pack. Live: audio top-up (+ DC best-effort).
+
+    Default append=True so mid-call /btw-topup adds facts instead of wiping the pack.
+    """
+    active = ss.get_active()
+    delta = (context or "").strip()
+    prior = (active.context or "").strip()
+    if append and prior and delta:
+        full = prior + "\n\n" + delta
+    else:
+        full = delta
+
+    s = ss.update_active(context=full)
     st = load_state()
-    set_context(st, context or "")
+    set_context(st, full)
     prof = load_profile(s["profile"])
-    instructions = prof.assemble_instructions(context or "")
+    instructions = prof.assemble_instructions(full)
     (data_dir() / "instructions.txt").write_text(instructions, encoding="utf-8")
+    (data_dir() / "context.txt").write_text(full, encoding="utf-8")
     st.instructions_chars = len(instructions)
     save_state(st)
 
     live_ok = False
     if _pid_running():
-        push_command("push_context", context=context or "")
-        # also refresh full instructions for reinject
-        push_command("reinject", instructions=instructions)
+        # Speak delta; pass full_context so runtime pack stays consistent
+        push_command(
+            "push_context",
+            context=delta,
+            full_context=full,
+            instructions=instructions,
+        )
         live_ok = True
 
     return {
         "ok": True,
-        "context_chars": len(context or ""),
+        "context_chars": len(full),
+        "delta_chars": len(delta),
+        "appended": bool(append and prior and delta),
         "instructions_chars": len(instructions),
-        "preview": (context or "")[:240].replace("\n", " "),
+        "preview": full[:240].replace("\n", " "),
         "session": s["name"],
         "live_push_queued": live_ok,
     }

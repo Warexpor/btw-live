@@ -5,6 +5,7 @@ import asyncio
 import fractions
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -364,3 +365,165 @@ class SilentTrack(MediaStreamTrack):
         frame.time_base = fractions.Fraction(1, SAMPLE_RATE)
         self._pts += FRAME_SAMPLES
         return frame
+
+
+def synthesize_speech_wav(text: str, path: str | Path, *, rate: int = 0) -> Path:
+    """Windows SAPI TTS → wav file (System.Speech)."""
+    import subprocess
+
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    safe = (text or "").replace("'", "''")[:2500]
+    out_ps = str(out).replace("'", "''")
+    ps = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        f"$s.Rate = {int(rate)}; "
+        f"$s.SetOutputToWaveFile('{out_ps}'); "
+        f"$s.Speak('{safe}'); "
+        "$s.Dispose();"
+    )
+    r = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if r.returncode != 0 or not out.is_file() or out.stat().st_size < 100:
+        raise RuntimeError(
+            f"SAPI TTS failed rc={r.returncode} stderr={(r.stderr or '')[:300]}"
+        )
+    return out
+
+
+def _load_wav_mono_48k(wav_path: str | Path) -> np.ndarray:
+    import wave
+
+    path = Path(wav_path)
+    with wave.open(str(path), "rb") as w:
+        ch = w.getnchannels()
+        sw = w.getsampwidth()
+        rate = w.getframerate()
+        raw = w.readframes(w.getnframes())
+    if sw != 2:
+        raise ValueError(f"need 16-bit wav, got sampwidth={sw}")
+    pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    if ch > 1:
+        pcm = pcm.reshape(-1, ch).mean(axis=1)
+    if rate != SAMPLE_RATE and pcm.size:
+        n_out = int(round(pcm.size * SAMPLE_RATE / rate))
+        x_old = np.linspace(0.0, 1.0, num=pcm.size, endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+        pcm = np.interp(x_new, x_old, pcm).astype(np.float32)
+    return np.clip(pcm, -1.0, 1.0).astype(np.float32)
+
+
+class InjectableUplinkTrack(MediaStreamTrack):
+    """Uplink: inject queue (context TTS) then live mic/silence.
+
+    Wingman listens to audio; DC text inject is best-effort only.
+    """
+
+    kind = "audio"
+
+    def __init__(self, base: Optional[MediaStreamTrack] = None):
+        super().__init__()
+        self._base = base
+        self._pts = 0
+        self._start = time.monotonic()
+        self._inject = np.zeros(0, dtype=np.float32)
+        self._lock = threading.Lock()
+        self._muted_base = False
+
+    def set_muted(self, muted: bool) -> None:
+        """Mute only the live mic base — injects still play."""
+        self._muted_base = bool(muted)
+        if self._base is not None and hasattr(self._base, "set_muted"):
+            self._base.set_muted(self._muted_base)
+
+    def inject_pcm(self, mono: np.ndarray) -> int:
+        mono = np.asarray(mono, dtype=np.float32).reshape(-1)
+        if mono.size == 0:
+            return 0
+        with self._lock:
+            self._inject = (
+                np.concatenate([self._inject, mono])
+                if self._inject.size
+                else mono.copy()
+            )
+            return int(self._inject.size)
+
+    def inject_wav(self, wav_path: str | Path) -> int:
+        return self.inject_pcm(_load_wav_mono_48k(wav_path))
+
+    def inject_queue_samples(self) -> int:
+        with self._lock:
+            return int(self._inject.size)
+
+    def _take_inject(self, n: int) -> np.ndarray:
+        with self._lock:
+            if self._inject.size == 0:
+                return np.zeros(n, dtype=np.float32)
+            take = self._inject[:n]
+            self._inject = self._inject[n:]
+            if take.size < n:
+                take = np.pad(take, (0, n - take.size))
+            return take
+
+    async def recv(self) -> AudioFrame:
+        if self.readyState != "live":
+            raise MediaStreamError
+
+        target = self._start + (self._pts / SAMPLE_RATE)
+        delay = target - time.monotonic()
+        if delay > 0.001:
+            await asyncio.sleep(delay)
+
+        if self.inject_queue_samples() > 0:
+            samples = self._take_inject(FRAME_SAMPLES)
+        elif self._base is not None and not self._muted_base:
+            try:
+                base_fr = await self._base.recv()
+                arr = base_fr.to_ndarray()
+                if arr.ndim > 1:
+                    arr = arr.mean(axis=0) if arr.shape[0] <= 8 else arr.mean(axis=-1)
+                samples = np.asarray(arr, dtype=np.float32).reshape(-1)
+                if base_fr.format.name in ("s16", "s16p"):
+                    samples = samples / 32768.0
+                if samples.size < FRAME_SAMPLES:
+                    samples = np.pad(samples, (0, FRAME_SAMPLES - samples.size))
+                else:
+                    samples = samples[:FRAME_SAMPLES]
+            except Exception:
+                samples = np.zeros(FRAME_SAMPLES, dtype=np.float32)
+        else:
+            samples = np.zeros(FRAME_SAMPLES, dtype=np.float32)
+
+        pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+        frame = AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
+        frame.sample_rate = SAMPLE_RATE
+        frame.planes[0].update(pcm.tobytes())
+        frame.pts = self._pts
+        frame.time_base = fractions.Fraction(1, SAMPLE_RATE)
+        self._pts += FRAME_SAMPLES
+        return frame
+
+    def stop(self) -> None:
+        if self._base is not None:
+            try:
+                self._base.stop()
+            except Exception:
+                pass
+            self._base = None
+        super().stop()
+
+
+class WavUplinkTrack(InjectableUplinkTrack):
+    """Back-compat: play one WAV then fall through to base."""
+
+    def __init__(self, wav_path: str | Path, *, after: Optional[MediaStreamTrack] = None):
+        super().__init__(base=after)
+        try:
+            self.inject_wav(wav_path)
+        except Exception:
+            pass
