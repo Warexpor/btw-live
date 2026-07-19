@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.9 — 2026-07-20
+
+### Fixed
+
+- Pin MCP + Live to plugin `.venv` python (`BTW_PYTHON` / `python_exe()`). Bare PATH `python` was Hermes venv and hung/spawned the wrong env.
+- `mcp/launch.cmd` refuses to start without `.venv`; `install.ps1` creates it and installs deps (uv preferred).
+
 ## 0.5.8 — 2026-07-20
 
 ### Added

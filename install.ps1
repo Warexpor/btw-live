@@ -5,7 +5,51 @@ $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 
 Write-Host "=== btw plugin install (standalone Live) ==="
-python -m pip install -e "$Root" -q
+
+function Resolve-Uv {
+    $c = Get-Command uv -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    $candidates = @(
+        (Join-Path $env:USERPROFILE "AppData\Local\hermes\bin\uv.exe"),
+        (Join-Path $env:USERPROFILE ".local\bin\uv.exe"),
+        (Join-Path $env:USERPROFILE "AppData\Local\Programs\uv\uv.exe")
+    )
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { return $p }
+    }
+    return $null
+}
+
+function Ensure-BtwVenv {
+    $venvPy = Join-Path $Root ".venv\Scripts\python.exe"
+    if (-not (Test-Path $venvPy)) {
+        $uv = Resolve-Uv
+        if ($uv) {
+            Write-Host "Creating plugin .venv with uv ($uv)..."
+            & $uv venv (Join-Path $Root ".venv") --python 3.11
+        } else {
+            Write-Host "Creating plugin .venv with python -m venv..."
+            $seed = Get-Command python -ErrorAction SilentlyContinue
+            if (-not $seed) { throw "Need uv or python on PATH once to create .venv" }
+            & $seed.Source -m venv (Join-Path $Root ".venv")
+        }
+    }
+    if (-not (Test-Path $venvPy)) { throw "Failed to create $venvPy" }
+
+    Write-Host "Installing btw deps into .venv..."
+    $uv = Resolve-Uv
+    if ($uv) {
+        & $uv pip install --python $venvPy -e $Root
+    } else {
+        & $venvPy -m pip install -U pip -q
+        & $venvPy -m pip install -e $Root -q
+    }
+    & $venvPy -c "import aiortc,sounddevice,av,curl_cffi,numpy; from btw.version import __version__; print('venv ok', __version__)"
+    return $venvPy
+}
+
+$venvPy = Ensure-BtwVenv
+Write-Host "Pinned python: $venvPy"
 
 $data = Join-Path $env:USERPROFILE ".grok\btw"
 New-Item -ItemType Directory -Force -Path $data | Out-Null
@@ -32,11 +76,16 @@ if ($grok) {
     & grok plugin install $Root --trust
     if (-not $NoEnable) { & grok plugin enable btw 2>$null }
 
-    # Plugin .mcp.json uses relative mcp/launch.cmd; Grok often spawns without
-    # plugin cwd -> "The system cannot find the path specified."
-    # Pin absolute path in user config (same pattern as wrath).
+    # After grok copies plugin, ensure *install* tree also has its own .venv
     $launch = Get-BtwLaunchCmd
     if ($launch) {
+        $installRoot = Split-Path (Split-Path $launch -Parent) -Parent
+        if ($installRoot -and (Test-Path $installRoot) -and ($installRoot -ne $Root)) {
+            Write-Host "Ensuring .venv on install tree: $installRoot"
+            $prev = $Root
+            $Root = $installRoot
+            try { Ensure-BtwVenv | Out-Null } finally { $Root = $prev }
+        }
         & grok mcp add btw -- $launch
         Write-Host "MCP btw pinned: $launch"
     } else {
@@ -52,5 +101,5 @@ if ($grok) {
 
 Write-Host "Data:    $data"
 Write-Host "Cookies: $data\cookie_header.txt"
-Write-Host "Doctor:  python -m btw.runtime doctor"
-Write-Host "Smoke:   python -m btw.runtime mint-smoke"
+Write-Host "Doctor:  $venvPy -m btw.runtime doctor"
+Write-Host "Smoke:   $venvPy -m btw.runtime mint-smoke"

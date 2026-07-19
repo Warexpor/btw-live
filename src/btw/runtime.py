@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cookies as cookie_mod
-from .paths import data_dir, plugin_root
+from .paths import data_dir, plugin_root, python_exe
 from .profiles import load_profile
 from .state import load_state, mark_error, mark_live, mark_starting, mark_stopped, save_state
 from .version import __version__
@@ -52,6 +52,15 @@ def doctor() -> dict[str, Any]:
         "plugin_root": str(plugin_root()),
         "mode": "standalone",
     }
+    try:
+        out["python_exe"] = python_exe()
+        out["python_exe_ok"] = True
+        out["python_is_hermes"] = "hermes" in out["python_exe"].lower()
+    except Exception as e:
+        out["python_exe"] = None
+        out["python_exe_ok"] = False
+        out["python_exe_error"] = str(e)
+        out["python_is_hermes"] = "hermes" in sys.executable.lower()
     for mod in ("curl_cffi", "aiortc", "av", "sounddevice", "numpy"):
         try:
             __import__(mod)
@@ -219,11 +228,17 @@ def start_background(
         return {"ok": False, "error": "already running", "pid_running": True}
 
     data_dir().mkdir(parents=True, exist_ok=True)
+    try:
+        py = python_exe()
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+
     env = os.environ.copy()
     env["PYTHONPATH"] = str(plugin_root() / "src") + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONUNBUFFERED"] = "1"
+    env["BTW_PYTHON"] = py
     cmd = [
-        sys.executable,
+        py,
         "-u",
         "-m",
         "btw.runtime",
