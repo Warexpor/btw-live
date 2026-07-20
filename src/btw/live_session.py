@@ -228,6 +228,7 @@ class LiveSession:
             else 0.0
         )
         down = 0.0
+        sp_stats: dict[str, Any] = {}
         if self.speaker is not None:
             # sample_meter releases when remote audio stops (no side-effect decay race)
             sample = getattr(self.speaker, "sample_meter", None)
@@ -235,6 +236,12 @@ class LiveSession:
                 down = float(sample() or 0.0)
             else:
                 down = float(getattr(self.speaker, "last_peak", 0.0) or 0.0)
+            st = getattr(self.speaker, "stats", None)
+            if callable(st):
+                try:
+                    sp_stats = dict(st() or {})
+                except Exception:
+                    sp_stats = {}
         injecting = False
         uplink_src = None
         mic_frames = 0
@@ -260,6 +267,10 @@ class LiveSession:
             "downlink_peak": min(1.0, max(0.0, down)),
             "uplink_src": uplink_src,
             "mic_frames": mic_frames,
+            "speaker_underruns": int(sp_stats.get("underruns") or 0),
+            "speaker_partial_underruns": int(sp_stats.get("partial_underruns") or 0),
+            "speaker_ring_drops": int(sp_stats.get("ring_drops") or 0),
+            "speaker_sd_underflows": int(sp_stats.get("sd_underflows") or 0),
             "pc": self.stats.get("pc_state"),
             "ice": self.stats.get("ice_state"),
             "dc_open": bool(self.stats.get("dc_open")),
@@ -768,7 +779,15 @@ class LiveSession:
                             if frames_n == 1:
                                 _log("speaker: first remote audio frame")
                             if frames_n % 250 == 0:
-                                _log(f"speaker: frames={frames_n}")
+                                st = speaker.stats() if hasattr(speaker, "stats") else {}
+                                _log(
+                                    f"speaker: frames={frames_n} "
+                                    f"u={st.get('underruns', 0)} "
+                                    f"pu={st.get('partial_underruns', 0)} "
+                                    f"drop={st.get('ring_drops', 0)} "
+                                    f"sd_uf={st.get('sd_underflows', 0)} "
+                                    f"ring={st.get('ring', 0)}"
+                                )
                         except Exception as e:
                             _log(f"play loop end frames={frames_n}: {e}")
                             break

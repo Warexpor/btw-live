@@ -18,8 +18,8 @@ See [docs/SAFE_DOCS.md](docs/SAFE_DOCS.md) for how we write docs going forward.
 | Sessions | Named packs: profile + context + optional voice + optional ChatGPT bind |
 | Mute | Mic mute without ending the call |
 | Voice | Speak voice id at mint (e.g. maple) |
-| Context | Profile + short pack; spoken on mic uplink (SAPI TTS) after connect |
-| `/btw-topup` | Mid-call curated fact snip (append pack + uplink TTS delta) |
+| Context | Profile + short pack; spoken on mic uplink (SAPI TTS) after connect. `btw_start(context=…)` **replaces** pack; omit keeps pack. |
+| `/btw-topup` | Mid-call curated fact snip (append pack + uplink TTS delta; `append=false` replaces) |
 | Resume | `/btw-session-bind` → hydrate prior turns + mint with `conversation_id` |
 | `/btw-viz` | Second-monitor live surface (WebView UI, levels + mute/stop) |
 

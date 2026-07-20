@@ -27,14 +27,19 @@ RING_SECONDS = 3
 # Hard safety: never let peaks hit full scale (ear protection)
 SPEAKER_GAIN = 0.28
 SPEAKER_PEAK_LIMIT = 0.40
-# Don't play until this much is buffered (startup only; keep short = less lag)
-SPEAKER_PREROLL = int(SAMPLE_RATE * 0.06)  # 60 ms
+# Startup buffer — thin enough for low lag, thick enough to ride 1–2 late packets
+SPEAKER_PREROLL = int(SAMPLE_RATE * 0.10)  # 100 ms
 # Crossfade only on real discontinuities (inject↔mic), not every speech frame
 DECLICK_SAMPLES = 64
 # Only treat near-digital jumps as decode glitches (speech legitimately jumps more)
 CLICK_JUMP = 0.85
-# Cap ring so late packets don't pile into multi-second lag
-SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.35)  # ~350 ms max backlog
+# Post-gain speaker joins (levels ~0.4 max): lower bar than full-scale uplink
+SPEAKER_JOIN_JUMP = 0.08
+SPEAKER_JOIN_SAMPLES = 48
+# Adaptive playout: trim backlog when high so lag doesn't sit near hard cap
+SPEAKER_TARGET = int(SAMPLE_RATE * 0.12)  # ~120 ms steady
+SPEAKER_HIGH = int(SAMPLE_RATE * 0.20)  # trim when above ~200 ms
+SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.30)  # hard cap ~300 ms
 
 
 class _FloatRing:
@@ -181,14 +186,23 @@ def _limit(mono: np.ndarray, gain: float = SPEAKER_GAIN, peak: float = SPEAKER_P
     return np.clip(x, -peak, peak).astype(np.float32)
 
 
-def _declick_join(prev_last: float, mono: np.ndarray, n: int = DECLICK_SAMPLES) -> np.ndarray:
-    """Blend only on large discontinuities (e.g. inject↔mic). Leave speech alone."""
+def _declick_join(
+    prev_last: float,
+    mono: np.ndarray,
+    n: int = DECLICK_SAMPLES,
+    *,
+    jump_thresh: float = 0.45,
+) -> np.ndarray:
+    """Blend only on large discontinuities (e.g. inject↔mic). Leave speech alone.
+
+    jump_thresh: abs step from prev_last → mono[0] required to crossfade.
+    Full-scale uplink uses ~0.45; post-gain speaker (~0.4 max) uses SPEAKER_JOIN_JUMP.
+    """
     mono = np.asarray(mono, dtype=np.float32).reshape(-1)
     if mono.size == 0:
         return mono
     jump = float(mono[0]) - float(prev_last)
-    # High bar: normal phonemes must not trigger this every 20ms frame
-    if abs(jump) < 0.45:
+    if abs(jump) < float(jump_thresh):
         return mono
     n = int(min(max(4, n), mono.size))
     out = mono.copy()
@@ -196,6 +210,36 @@ def _declick_join(prev_last: float, mono: np.ndarray, n: int = DECLICK_SAMPLES) 
     held = np.full(n, float(prev_last), dtype=np.float32)
     out[:n] = held * (1.0 - fade) + out[:n] * fade
     return out
+
+
+def _speaker_pull_block(
+    ring: _FloatRing,
+    frames: int,
+    last_played: float,
+) -> tuple[np.ndarray, float, bool]:
+    """Pull one output block. Never hard-zero a shortfall (that clicks).
+
+    Returns (mono, new_last_played, starved).
+    starved=True when the ring could not fully supply `frames` samples.
+    """
+    frames = int(frames)
+    if frames <= 0:
+        return np.zeros(0, dtype=np.float32), float(last_played), False
+    have = ring.size
+    if have <= 0:
+        mono = _fade_from_hold(last_played, frames)
+        last = float(mono[-1]) if mono.size else 0.0
+        return mono, last, True
+    if have < frames:
+        head = ring.read(have)
+        hold = float(head[-1]) if head.size else float(last_played)
+        tail = _fade_from_hold(hold, frames - have)
+        mono = np.concatenate([head, tail]) if head.size else tail
+        last = float(mono[-1]) if mono.size else 0.0
+        return mono, last, True
+    mono = ring.read(frames)
+    last = float(mono[-1]) if mono.size else 0.0
+    return mono, last, False
 
 
 def _soften_intra_clicks(mono: np.ndarray, jump: float = CLICK_JUMP) -> np.ndarray:
@@ -402,8 +446,8 @@ class SpeakerPlayer:
     """Remote audio → speakers with underrun/glitch smoothing.
 
     Cracks often come from (a) ring underruns → hard zeros, (b) decode spikes,
-    (c) discontinuous frame joins. We do not invent missing audio from OpenAI,
-    but we *do* declick edges and fade holds so our path does not make it worse.
+    (c) discontinuous packet / drop joins. We do not invent missing OpenAI
+    audio, but we *do* fade shortfalls and declick real edges only.
     """
 
     def __init__(self, device: Optional[int | str] = None, gain: float = SPEAKER_GAIN):
@@ -424,12 +468,29 @@ class SpeakerPlayer:
         self._last_played = 0.0
         self._last_written = 0.0
         self._write_lock = threading.Lock()
+        self._starved = False
+        self._need_join = False  # set after lag drop — next play block blends
+        # diagnostics (surfaced in stats())
+        self.underruns = 0
+        self.partial_underruns = 0
+        self.ring_drops = 0
+        self.sd_underflows = 0
 
     def sample_meter(self) -> float:
         """Envelope level; releases when no remote frames recently."""
         if self._last_audio_ts and (time.monotonic() - self._last_audio_ts) > 0.05:
             self.last_peak = self._env.update(0.0)
         return float(self.last_peak)
+
+    def stats(self) -> dict:
+        return {
+            "frames_in": self._frames_in,
+            "ring": self._ring.size,
+            "underruns": self.underruns,
+            "partial_underruns": self.partial_underruns,
+            "ring_drops": self.ring_drops,
+            "sd_underflows": self.sd_underflows,
+        }
 
     def start(self) -> None:
         try:
@@ -447,7 +508,15 @@ class SpeakerPlayer:
         player = self
 
         def callback(outdata, frames, time_info, status):  # noqa: ARG001
-            # Play path must stay cheap and clean — no per-block soften/smear.
+            # Play path must stay cheap — no per-block speech smear.
+            if status:
+                try:
+                    # PortAudio / sounddevice underflow flag
+                    if bool(status):
+                        player.sd_underflows += 1
+                except Exception:
+                    pass
+
             have = player._ring.size
             if not player._ready:
                 if have >= SPEAKER_PREROLL:
@@ -455,19 +524,31 @@ class SpeakerPlayer:
                 else:
                     outdata.fill(0)
                     player._last_played = 0.0
+                    player._starved = False
                     return
 
-            if have <= 0:
-                mono = _fade_from_hold(player._last_played, frames)
-                player._last_played = float(mono[-1]) if mono.size else 0.0
-            elif have < frames:
-                head = player._ring.read(have)
-                tail = np.zeros(frames - have, dtype=np.float32)
-                mono = np.concatenate([head, tail]) if head.size else tail
-                player._last_played = float(head[-1]) if head.size else 0.0
-            else:
-                mono = player._ring.read(frames)
-                player._last_played = float(mono[-1]) if mono.size else 0.0
+            was_starved = player._starved
+            need_join = player._need_join
+            mono, last, starved = _speaker_pull_block(
+                player._ring, frames, player._last_played
+            )
+            if starved:
+                if have <= 0:
+                    player.underruns += 1
+                else:
+                    player.partial_underruns += 1
+            # After underrun or lag-drop, blend into the next real audio block
+            if (was_starved or need_join) and not starved and mono.size:
+                mono = _declick_join(
+                    player._last_played,
+                    mono,
+                    n=SPEAKER_JOIN_SAMPLES,
+                    jump_thresh=SPEAKER_JOIN_JUMP,
+                )
+                last = float(mono[-1]) if mono.size else last
+                player._need_join = False
+            player._starved = starved
+            player._last_played = last
 
             # already limited on write — only hard-safety here
             mono = np.clip(mono, -SPEAKER_PEAK_LIMIT, SPEAKER_PEAK_LIMIT)
@@ -485,7 +566,8 @@ class SpeakerPlayer:
             dtype="float32",
             blocksize=FRAME_SAMPLES,
             device=self._device,
-            latency="low",
+            # "low" underruns under WebRTC jitter; ~80ms OS buffer is still snappy
+            latency=0.08,
             callback=callback,
         )
         self._stream.start()
@@ -514,15 +596,33 @@ class SpeakerPlayer:
             # Rare digital spikes only; do not re-process every speech frame
             mono = _soften_intra_clicks(mono)
             limited = _limit(mono, gain=self._gain, peak=SPEAKER_PEAK_LIMIT)
+            # Packet boundary join (post-gain). Mild speech steps stay under bar.
             with self._write_lock:
+                limited = _declick_join(
+                    self._last_written,
+                    limited,
+                    n=SPEAKER_JOIN_SAMPLES,
+                    jump_thresh=SPEAKER_JOIN_JUMP,
+                )
                 if limited.size:
                     self._last_written = float(limited[-1])
             heard = _frame_level(limited / max(SPEAKER_PEAK_LIMIT, 1e-6))
             self.last_peak = self._env.update(heard)
             self._last_audio_ts = time.monotonic()
             self._ring.write(limited)
-            # Drop oldest if network jitter filled a lag backlog
-            self._ring.drop_to(SPEAKER_RING_MAX)
+            # Keep playout near target: trim when high water, hard-cap always
+            size = self._ring.size
+            if size > SPEAKER_RING_MAX:
+                dropped = self._ring.drop_to(SPEAKER_TARGET)
+            elif size > SPEAKER_HIGH:
+                # Nibble toward target (one frame of lag per write) — less lag, soft joins
+                keep = max(SPEAKER_TARGET, size - FRAME_SAMPLES)
+                dropped = self._ring.drop_to(keep)
+            else:
+                dropped = 0
+            if dropped:
+                self.ring_drops += 1
+                self._need_join = True
             self._frames_in += 1
             if not self._ready and self._ring.size >= SPEAKER_PREROLL:
                 self._ready = True
@@ -533,6 +633,8 @@ class SpeakerPlayer:
         self._last_audio_ts = 0.0
         self._last_played = 0.0
         self._last_written = 0.0
+        self._starved = False
+        self._need_join = False
         self._env.reset()
         self._ring.clear()
         if self._stream is not None:

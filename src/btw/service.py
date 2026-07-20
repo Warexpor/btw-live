@@ -320,6 +320,7 @@ def push_context(context: str, *, append: bool = True) -> dict[str, Any]:
     """Update active session pack; if Live, queue uplink TTS top-up (what's new).
 
     Default append=True so mid-call /btw-topup adds facts instead of wiping the pack.
+    append=False replaces the pack entirely (boot brief / clean slate).
     Product inject is short spoken audio on the mic uplink (DC plain is best-effort).
     """
     active = ss.get_active()
@@ -355,6 +356,7 @@ def push_context(context: str, *, append: bool = True) -> dict[str, Any]:
         "context_chars": len(full),
         "delta_chars": len(delta),
         "appended": bool(append and prior and delta),
+        "replaced": bool(not append),
         "instructions_chars": len(instructions),
         "preview": full[:240].replace("\n", " "),
         "delta_preview": delta[:200].replace("\n", " "),
@@ -384,7 +386,9 @@ def preview_instructions(
         "instruction_events": instruction_events(instructions),
         "how_it_works": (
             "Product inject = uplink TTS after PC connect (session brief) and on "
-            "/btw-topup (delta only, pack appends). Disable with BTW_NO_AUDIO_INJECT=1. "
+            "/btw-topup (delta only). btw_start(context=...) REPLACES the pack; "
+            "btw_push_context appends by default (append=false replaces). "
+            "Disable audio inject with BTW_NO_AUDIO_INJECT=1. "
             "Plain DC send is best-effort only (channel often closes fast). "
             "Realtime JSON only if BTW_DC_REALTIME=1."
         ),
@@ -456,11 +460,20 @@ def start(
     use_mic: bool = True,
     muted: bool = False,
 ) -> dict[str, Any]:
+    """Start Live for the active session.
+
+    If ``context`` is provided (including empty string), it **replaces** the
+    session pack before prepare/boot inject. Omit ``context`` to keep the pack.
+    Mid-call deltas still use ``push_context`` (append default).
+    """
     if _pid_running():
         return {"ok": False, "error": "already live — stop first", "status": status()}
 
+    context_replaced = False
     if context is not None:
-        push_context(context)
+        # Boot brief is the whole pack for this call — never append onto stale history.
+        push_context(context, append=False)
+        context_replaced = True
     if profile:
         set_profile(profile)
 
@@ -495,6 +508,8 @@ def start(
         "profile": active.profile,
         "voice": speak,
         "instructions_chars": prep.get("instructions_chars"),
+        "context_chars": prep.get("context_chars"),
+        "context_replaced": context_replaced,
         "conversation_id": prep.get("conversation_id"),
         "resume": prep.get("resume"),
         "resume_chars": prep.get("resume_chars"),

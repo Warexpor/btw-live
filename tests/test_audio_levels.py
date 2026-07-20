@@ -4,14 +4,17 @@ from __future__ import annotations
 import numpy as np
 
 from btw.audio_io import (
+    FRAME_SAMPLES,
     MIC_LIVE_EDGE_SAMPLES,
     SAMPLE_RATE,
+    SPEAKER_JOIN_JUMP,
     _Envelope,
     _FloatRing,
     _declick_join,
     _fade_from_hold,
     _frame_level,
     _soften_intra_clicks,
+    _speaker_pull_block,
 )
 
 
@@ -85,3 +88,47 @@ def test_fade_from_hold_decays():
     assert y.size == 100
     assert float(y[0]) == 0.5
     assert abs(float(y[-1])) < abs(float(y[0]))
+
+
+def test_speaker_pull_full_block_not_starved():
+    r = _FloatRing(SAMPLE_RATE)
+    r.write(np.linspace(0.1, 0.2, FRAME_SAMPLES, dtype=np.float32))
+    mono, last, starved = _speaker_pull_block(r, FRAME_SAMPLES, 0.1)
+    assert not starved
+    assert mono.size == FRAME_SAMPLES
+    assert abs(float(last) - 0.2) < 1e-5
+    assert r.size == 0
+
+
+def test_speaker_pull_partial_never_hard_zeros():
+    """Shortfall used to np.zeros → audible crack at speech→silence edge."""
+    r = _FloatRing(SAMPLE_RATE)
+    head_n = 200
+    r.write(np.full(head_n, 0.3, dtype=np.float32))
+    mono, last, starved = _speaker_pull_block(r, FRAME_SAMPLES, 0.3)
+    assert starved
+    assert mono.size == FRAME_SAMPLES
+    # first samples are speech level; tail is decayed hold — never a hard step to 0
+    assert abs(float(mono[0]) - 0.3) < 1e-5
+    assert abs(float(mono[head_n - 1]) - 0.3) < 1e-5
+    # right after shortfall starts, still near hold (fade), not forced zero
+    assert abs(float(mono[head_n])) > 0.15
+    assert abs(float(last)) < abs(float(mono[head_n]))
+
+
+def test_speaker_pull_empty_fades_hold():
+    r = _FloatRing(SAMPLE_RATE)
+    mono, last, starved = _speaker_pull_block(r, FRAME_SAMPLES, 0.25)
+    assert starved
+    assert mono.size == FRAME_SAMPLES
+    assert float(mono[0]) == 0.25
+    assert abs(float(last)) < 0.25
+
+
+def test_speaker_join_thresh_catches_post_gain_edges():
+    # post-gain levels are small; default 0.45 bar would miss these
+    mono = np.full(960, 0.2, dtype=np.float32)
+    out = _declick_join(0.0, mono, n=32, jump_thresh=SPEAKER_JOIN_JUMP)
+    assert abs(float(out[0])) < 0.05
+    mild = np.linspace(0.05, 0.07, 960, dtype=np.float32)
+    assert np.allclose(_declick_join(0.05, mild, jump_thresh=SPEAKER_JOIN_JUMP), mild)

@@ -12,14 +12,15 @@ Separate Live voice channel. Not the coding agent.
 1. **Profile** = system rules (`sessions/*.toml`: default / debugger / architect).
 2. **Session** = named pack: profile + context text.
 3. **Context** = short Grok facts (goal, files, errors). Stored on the active session.
-4. On **start**, context is spoken onto the mic uplink (short SAPI TTS) after PC connects — Wingman only reliably hears audio. DC plain is best-effort. Disable with `BTW_NO_AUDIO_INJECT=1`.
-5. Mid-call: `/btw-topup` → `btw_push_context` appends pack + spoken delta on uplink (same path).
+4. On **start**, the **session pack** is spoken onto the mic uplink (SAPI TTS) after PC connects. DC plain is best-effort. Disable with `BTW_NO_AUDIO_INJECT=1`.
+5. **`btw_start(context=...)` REPLACES the pack** before boot. Omit `context` to keep the existing pack. Never rely on append for a new call brief.
+6. Mid-call: `/btw-topup` → `btw_push_context` **appends** pack + spoken delta (`append=false` to wipe/replace mid-call).
 
 ## User phrases → tools
 
 | User | Tools |
 |------|--------|
-| `/btw-vc` start | `btw_status` → optional `btw_push_context` → `btw_start` (opens visualizer) |
+| `/btw-vc` start | `btw_status` → `btw_start` with **this call's** context snip (replaces pack). Do not pre-`push_context` append then start. |
 | `/btw-viz` | `btw_viz` — levels GUI |
 | stop | `btw_stop` |
 | `/btw-mute` · `/btw-unmute` | `btw_mute` / `btw_unmute` |
@@ -31,7 +32,7 @@ Separate Live voice channel. Not the coding agent.
 | `/btw-session-fresh` | `btw_session_fresh` |
 | `/btw-session-sync` | `btw_session_sync` |
 | `/btw-voice` | `btw_list_voices` / `btw_set_voice` |
-| `/btw-topup` / push context | `btw_push_context` (append pack + uplink TTS delta) |
+| `/btw-topup` / push context | `btw_push_context` (append pack + uplink TTS delta; `append=false` replace) |
 | reinject prompt | `btw_reinject` |
 | doctor | `btw_doctor` |
 
@@ -39,10 +40,10 @@ Separate Live voice channel. Not the coding agent.
 
 1. Cookies ok (`btw_status`).
 2. Active session + profile correct.
-3. Context snip if useful (≤4–6k).
-4. **Resume (optional):** if active session has `conversation_id` / `resume: true`, start hydrates prior ChatGPT voice turns and mints with that id. Bind with `/btw-session-bind`; clear with `/btw-session-fresh`; refresh metadata with `/btw-session-sync`.
-5. `btw_start` (auto-opens visualizer unless `BTW_NO_VIZ`).
-6. One short confirm: live / muted / session name / resume? / viz. No secrets.
+3. Curate **this call's** context snip only (≤4–6k). Advisory Grok facts — not mic/SAPI/viz ops meta, not prior version dump.
+4. `btw_start(context=snip)` so pack is replaced and boot inject matches the snip. Omit context only when reusing the pack on purpose.
+5. **Resume (optional):** if active session has `conversation_id` / `resume: true`, start hydrates prior ChatGPT voice turns and mints with that id. Bind with `/btw-session-bind`; clear with `/btw-session-fresh`; refresh metadata with `/btw-session-sync`.
+6. One short confirm: live / muted / session name / resume? / context_replaced? / viz. No secrets.
 
 ## Rules
 

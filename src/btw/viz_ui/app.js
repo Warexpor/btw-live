@@ -13,6 +13,8 @@
     injecting: false,
     speaking: false,
     speakLatch: 0,
+    // hold optimistic mute until meters catch up (prevents 1-frame flash)
+    muteHoldUntil: 0,
     focus: false,
     t0: performance.now(),
     bridge: "file",
@@ -303,7 +305,7 @@
   }
 
   function paintOrb(dn, up, live, muted, injecting) {
-    // Calm dial: idle motion stays; AI only adds a subtle global pulse.
+    // Calm dial: idle motion stays; AI-only global pulse (readable, not thrash).
     // `up` kept for API parity — never mixed into orb energy.
     void up;
     void injecting;
@@ -317,38 +319,44 @@
     const muteM = mx.muted;
     const speakM = mx.speak;
     const energy = liveM > 0.05 ? aiEnergy(dn) * liveM : 0;
-    // heavily smoothed speak amount (0..1) — no frame-to-frame thrash
-    const speakSoft = speakM * Math.min(1, 0.35 + energy * 0.25);
+    // smoothed speak amount — tracks energy enough that quiet speech still pulses
+    const speakSoft = speakM * Math.min(1, 0.45 + energy * 0.7);
     const idlePulse = 0.12 + 0.08 * Math.sin(t * 0.9);
     const breath = 0.5 + 0.5 * Math.sin(t * 0.85);
+    // speech-paced breath (clearer than idle-only when she talks)
+    const speakBreath = 0.5 + 0.5 * Math.sin(t * 2.15);
     // spin barely accelerates when she talks
-    const spin = t * (0.18 + speakSoft * 0.02);
+    const spin = t * (0.18 + speakSoft * 0.05);
     const m = Math.min(w, h);
-    // drive stays near idle; speech nudges glow/radius only
-    const drive = idlePulse + speakSoft * 0.04;
-    // subtle scale pulse (~1–2.5%) — not a bounce
+    // glow drive lifts with speech so pulse reads on the halo too
+    const drive = idlePulse + speakSoft * (0.16 + 0.12 * speakBreath + energy * 0.1);
+    // scale pulse ~8–16% peak — clearly readable while she talks
     const pulse =
       1 +
-      speakSoft * (0.012 + 0.014 * Math.sin(t * 2.4) + energy * 0.008);
+      speakSoft *
+        (0.07 + 0.08 * Math.sin(t * 2.15) + energy * 0.035 + speakBreath * 0.02);
 
     c.clearRect(0, 0, w, h);
-    // cosmos bloom stays tiny even while speaking; mute wash eases in
+    // cosmos bloom lifts a bit with speech; mute wash eases in
     paintCosmos(
       c,
       w,
       h,
       t,
       liveM > 0.2,
-      speakSoft * (0.04 + 0.05 * speakSoft),
+      speakSoft * (0.12 + 0.14 * speakSoft + 0.06 * speakBreath),
       muteM > 0.15
     );
 
     const R = m * 0.36 * pulse;
 
-    // event-horizon glow — soft; no flash
+    // event-horizon glow — stronger when speaking so pulse is obvious
     const halo = c.createRadialGradient(cx, cy, R * 0.12, cx, cy, R * 1.55);
-    halo.addColorStop(0, `rgba(255,255,255,${0.035 + drive * 0.03 + speakSoft * 0.02})`);
-    halo.addColorStop(0.5, `rgba(255,255,255,${0.012 + drive * 0.015})`);
+    halo.addColorStop(
+      0,
+      `rgba(255,255,255,${0.035 + drive * 0.05 + speakSoft * (0.08 + 0.05 * speakBreath)})`
+    );
+    halo.addColorStop(0.5, `rgba(255,255,255,${0.012 + drive * 0.025 + speakSoft * 0.03})`);
     halo.addColorStop(1, "rgba(0,0,0,0)");
     c.fillStyle = halo;
     c.beginPath();
@@ -365,13 +373,15 @@
       c.fill();
     }
 
-    // concentric rings — same character idle or speaking
+    // concentric rings — breathe more while speaking (still even, not jagged)
     const ringRs = [0.28, 0.42, 0.56, 0.72, 0.88, 1.0];
     for (let i = 0; i < ringRs.length; i++) {
-      const rr = R * ringRs[i] * (1 + breath * 0.008 * (i % 2 === 0 ? 1 : -1));
+      const ringBreath =
+        breath * 0.008 + speakSoft * speakBreath * 0.045 * (i % 2 === 0 ? 1 : -1);
+      const rr = R * ringRs[i] * (1 + ringBreath);
       c.beginPath();
       c.arc(cx, cy, rr, 0, Math.PI * 2);
-      c.strokeStyle = `rgba(255,255,255,${0.05 + i * 0.022 + drive * 0.02})`;
+      c.strokeStyle = `rgba(255,255,255,${0.05 + i * 0.022 + drive * 0.03 + speakSoft * 0.045})`;
       c.lineWidth = Math.max(1, m * (0.0018 + (i === ringRs.length - 1 ? 0.001 : 0)));
       c.stroke();
     }
@@ -438,15 +448,20 @@
     c.lineWidth = Math.max(1, m * 0.0025);
     c.stroke();
 
-    // orbiting arcs — idle pace; speech does not widen sweeps
+    // orbiting arcs — slight sweep/alpha lift while speaking (still smooth)
     for (let o = 0; o < 3; o++) {
       const base = R * (0.34 + o * 0.14);
-      const sweep = 0.65 + idlePulse * 0.75 + o * 0.18 + breath * 0.08;
+      const sweep =
+        0.65 +
+        idlePulse * 0.75 +
+        o * 0.18 +
+        breath * 0.08 +
+        speakSoft * (0.12 + 0.1 * speakBreath);
       const ang = spin * (1.15 + o * 0.4) + o * 2.05;
       c.beginPath();
       c.arc(cx, cy, base, ang, ang + sweep);
-      c.strokeStyle = `rgba(255,255,255,${0.09 + idlePulse * 0.12 - o * 0.015})`;
-      c.lineWidth = Math.max(1.2, m * (0.0045 - o * 0.0006));
+      c.strokeStyle = `rgba(255,255,255,${0.09 + idlePulse * 0.12 + speakSoft * 0.1 - o * 0.015})`;
+      c.lineWidth = Math.max(1.2, m * (0.0045 - o * 0.0006 + speakSoft * 0.0008));
       c.lineCap = "round";
       c.stroke();
       c.beginPath();
@@ -457,16 +472,21 @@
         ang + Math.PI * 0.9,
         ang + Math.PI * 0.9 + sweep * 0.45
       );
-      c.strokeStyle = `rgba(255,255,255,${0.04 + idlePulse * 0.04})`;
+      c.strokeStyle = `rgba(255,255,255,${0.04 + idlePulse * 0.04 + speakSoft * 0.04})`;
       c.lineWidth = Math.max(1, m * 0.002);
       c.lineCap = "round";
       c.stroke();
     }
 
-    // core — gentle brightness when speaking; nucleus eases white↔sunset on mute
-    const coreR = R * (0.18 + 0.01 + breath * 0.02 + speakSoft * 0.012);
+    // core — clearer breath when speaking; nucleus eases white↔sunset on mute
+    const coreR =
+      R *
+      (0.18 +
+        0.01 +
+        breath * 0.02 +
+        speakSoft * (0.055 + 0.06 * speakBreath + energy * 0.03));
     const coreG = c.createRadialGradient(cx, cy, 0, cx, cy, coreR * 1.7);
-    const coreTop = liveM < 0.15 ? "#1a1a20" : speakSoft > 0.2 ? "#1e1e24" : "#1a1a20";
+    const coreTop = liveM < 0.15 ? "#1a1a20" : speakSoft > 0.2 ? "#26262c" : "#1a1a20";
     coreG.addColorStop(0, coreTop);
     if (liveM < 0.15) coreG.addColorStop(0.55, "#101014");
     coreG.addColorStop(1, "#0a0a0a");
@@ -477,17 +497,17 @@
 
     c.beginPath();
     c.arc(cx, cy, coreR, 0, Math.PI * 2);
-    c.strokeStyle = `rgba(255,255,255,${lerp(0.16, 0.2 + speakSoft * 0.06, liveM)})`;
+    c.strokeStyle = `rgba(255,255,255,${lerp(0.16, 0.26 + speakSoft * 0.18, liveM)})`;
     c.lineWidth = Math.max(1.2, m * 0.004);
     c.stroke();
 
     c.beginPath();
     c.arc(cx, cy, coreR * 0.55, 0, Math.PI * 2);
-    c.strokeStyle = "rgba(255,255,255,0.08)";
+    c.strokeStyle = `rgba(255,255,255,${0.08 + speakSoft * 0.1})`;
     c.lineWidth = Math.max(1, m * 0.002);
     c.stroke();
 
-    const nr = Math.max(2.5, coreR * (0.26 + speakSoft * 0.03));
+    const nr = Math.max(2.5, coreR * (0.26 + speakSoft * (0.09 + 0.06 * speakBreath)));
     // blend nucleus color by mute mix (smooth mute transition)
     const nw = Math.round(lerp(255, 255, muteM));
     const ng = Math.round(lerp(255, 122, muteM));
@@ -499,7 +519,7 @@
     c.beginPath();
     c.arc(cx, cy, nr, 0, Math.PI * 2);
     c.fillStyle = `rgb(${fr},${fg},${fb})`;
-    c.globalAlpha = lerp(0.62, 0.88 + speakSoft * 0.06, liveM);
+    c.globalAlpha = lerp(0.62, 0.9 + speakSoft * 0.1, liveM);
     c.fill();
     c.globalAlpha = 1;
 
@@ -670,9 +690,17 @@
     if (state.histUp.length > HISTORY) state.histUp.shift();
     if (state.histDn.length > HISTORY) state.histDn.shift();
 
-    const muted = !!m.muted;
+    const serverMuted = !!m.muted;
     const injecting = !!m.injecting;
-    state.muted = muted;
+    // Optimistic mute: ignore stale server until hold expires or it matches
+    const now = performance.now();
+    if (now < state.muteHoldUntil) {
+      if (serverMuted === state.muted) state.muteHoldUntil = 0;
+      // keep state.muted (optimistic)
+    } else {
+      state.muted = serverMuted;
+    }
+    const muted = state.muted;
     state.injecting = injecting;
 
     // AI-only speaking latch (mute is mic uplink only — does not suppress this)
@@ -811,17 +839,23 @@
   }
 
   async function muteToggle() {
-    // Optimistic mix so mute chrome eases immediately
+    // Optimistic + hold so next meter poll cannot flash the old mute for a frame
     const next = !state.muted;
     state.muted = next;
+    state.muteHoldUntil = performance.now() + 900;
     state.tgt.muted = state.live && next ? 1 : 0;
+    // snap mute mix toward target so chrome doesn't ease reverse for a frame
+    state.mix.muted = state.tgt.muted;
     document.body.classList.toggle("muted", state.live && next);
     if (el.btnMute) {
       el.btnMute.classList.toggle("pill-muted", state.live && next);
       setText(el.btnMute, next ? "Unmute" : "Mute");
       state.lastMuteLabel = next ? "Unmute" : "Mute";
+      el.btnMute.setAttribute("aria-pressed", next ? "true" : "false");
     }
     if (next) setOrbLabel("muted", "warn");
+    else if (state.speaking) setOrbLabel("ai", "hot");
+    else if (state.live) setOrbLabel("listen");
     try {
       if (next) await bridgeCall("mute");
       else await bridgeCall("unmute");

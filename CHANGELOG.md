@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.48 — 2026-07-20
+
+### Fixed
+
+- **Mute UI flash:** optimistic mute held until meters agree (~900ms) so a stale poll cannot flip chrome/label for one frame; mute mix snaps on click.
+- **Occasional playout lag:** adaptive ring trim — nibble toward ~120ms when above ~200ms; hard cap ~300ms (was 450ms sit-and-wait).
+
+### Changed
+
+- **Orb pulse stronger:** speak scale ~8–16%, more halo/core/ring breath while AI talks (still smooth, AI-only).
+
+## 0.5.47 — 2026-07-20
+
+### Fixed
+
+- **Speaker cracks (root cause):** partial underruns hard-zeroed the shortfall → occasional clicks. Fade-hold like full underruns; post-gain packet joins; crossfade after underrun/lag-drop recovery. Preroll 100ms, ring max 450ms, PortAudio latency 0.08s.
+- **`btw_start(context=...)` no longer appends onto a stale session pack.** Passing `context` **replaces** the pack before prepare/boot inject so the spoken brief matches this call. Omit `context` to keep the pack. Mid-call `/btw-topup` still appends by default.
+- **MCP `btw_push_context`:** expose `append` (default true); `append=false` replaces the pack. Start tool blurb documents replace semantics. Skills (`btw-vc`, `btw-topup`) aligned.
+
+### Added
+
+- Speaker diagnostics: underruns / partial_underruns / ring_drops / sd_underflows in meters + runtime log.
+- Start response fields `context_replaced`, `context_chars`. Push response field `replaced`.
+
+## 0.5.46 — 2026-07-20
+
+### Changed
+
+- **Visualizer AI pulse more visible:** speak scale ~4–10% (was ~1–2.5%), stronger halo/core/ring breath and arc lift when she talks. Still AI-only, smooth (no mic drive, no tick thrash / jagged contour).
+
 ## 0.5.45 — 2026-07-20
 
 ### Fixed

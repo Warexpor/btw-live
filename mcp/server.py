@@ -123,10 +123,19 @@ TOOLS = [
     },
     {
         "name": "btw_push_context",
-        "description": "Set/append context pack on active session. If live, queue uplink TTS top-up (delta).",
+        "description": (
+            "Update context pack on active session. Default append=true (mid-call top-up: "
+            "append + uplink TTS delta). append=false replaces the pack. If live, queues inject."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"context": {"type": "string"}},
+            "properties": {
+                "context": {"type": "string"},
+                "append": {
+                    "type": "boolean",
+                    "description": "true (default) append delta; false replace entire pack",
+                },
+            },
             "required": ["context"],
         },
     },
@@ -143,12 +152,18 @@ TOOLS = [
     },
     {
         "name": "btw_start",
-        "description": "Start /btw-vc Live voice for the active session.",
+        "description": (
+            "Start /btw-vc Live voice for the active session. "
+            "If context is set, it REPLACES the session pack (boot brief); omit to keep pack."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "profile": {"type": "string"},
-                "context": {"type": "string"},
+                "context": {
+                    "type": "string",
+                    "description": "Optional. When provided, replaces session pack before boot inject.",
+                },
                 "use_mic": {"type": "boolean"},
                 "muted": {"type": "boolean"},
             },
@@ -235,7 +250,15 @@ def handle_tool(name: str, args: dict) -> dict:
         if name == "btw_set_profile":
             return _ok(service.set_profile(args["name"]))
         if name == "btw_push_context":
-            return _ok(service.push_context(args.get("context") or ""))
+            append = args.get("append")
+            if append is None:
+                append = True
+            return _ok(
+                service.push_context(
+                    args.get("context") or "",
+                    append=bool(append),
+                )
+            )
         if name == "btw_preview_instructions":
             return _ok(
                 service.preview_instructions(
@@ -244,14 +267,15 @@ def handle_tool(name: str, args: dict) -> dict:
                 )
             )
         if name == "btw_start":
-            return _ok(
-                service.start(
-                    profile=args.get("profile"),
-                    context=args.get("context"),
-                    use_mic=args.get("use_mic", True) is not False,
-                    muted=bool(args.get("muted") or False),
-                )
-            )
+            # Preserve explicit null/omit vs empty string: only pass context if key present.
+            start_kw: dict = {
+                "profile": args.get("profile"),
+                "use_mic": args.get("use_mic", True) is not False,
+                "muted": bool(args.get("muted") or False),
+            }
+            if "context" in args and args.get("context") is not None:
+                start_kw["context"] = args.get("context") or ""
+            return _ok(service.start(**start_kw))
         if name == "btw_stop":
             return _ok(service.stop())
         if name == "btw_mute":

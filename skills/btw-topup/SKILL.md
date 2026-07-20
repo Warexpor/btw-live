@@ -12,7 +12,7 @@ Not the whole Grok chat. Not a second full session brief.
 ## Flow
 
 1. Curate a tight snip of **only new facts** since last inject (goal change, file, error, decision, test result). Target **≤280–400 chars spoken** (pack can be longer).
-2. Call `btw_push_context` with that snip (service **appends** pack; Live speaks **delta only**).
+2. Call `btw_push_context` with that snip (default **append** pack; Live speaks **delta only**). Use `append=false` only to wipe and replace the whole pack mid-call.
 3. Runtime: uplink TTS of the delta (product path). DC plain if channel still open is best-effort only.
 4. Confirm in one line: topped up / delta_chars / live_push_queued / inject.
 
