@@ -12,5 +12,7 @@ __pycache__/
 .venv/
 *.pyc
 .env
+.pytest_cache/
+.ruff_cache/
 # never ship local plugin data
 .btw-data/

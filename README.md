@@ -18,8 +18,8 @@ See [docs/SAFE_DOCS.md](docs/SAFE_DOCS.md) for how we write docs going forward.
 | Sessions | Named packs: profile + context + optional voice |
 | Mute | Mic mute without ending the call |
 | Voice | Speak voice id at mint (e.g. maple) |
-| Context | Profile + short pack; spoken uplink brief (DC text best-effort) |
-| `/btw-topup` | Mid-call curated fact snip (append + speak delta) |
+| Context | Profile + short pack; plain-text datachannel brief on start |
+| `/btw-topup` | Mid-call curated fact snip (append + plain-text DC inject) |
 | `/btw-viz` | Second-monitor live surface (WebView UI, levels + mute/stop) |
 
 Not a second coding agent. Side channel only.

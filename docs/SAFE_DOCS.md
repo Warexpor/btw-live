@@ -19,7 +19,7 @@ Apply this whenever README, skill text, marketing, or install docs are written.
 
 - Architecture at a high level (auth → mint → WebRTC).
 - Install, slash commands, sessions, mute, voice pick.
-- Honest limits (DC injection best-effort, cookie expiry, not full ChatGPT UI parity).
+- Honest limits (plain-text DC context inject, cookie expiry, not full ChatGPT UI parity).
 
 ## What docs should avoid
 

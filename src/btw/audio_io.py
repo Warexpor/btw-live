@@ -92,6 +92,7 @@ def _to_mono_float(arr: np.ndarray) -> np.ndarray:
     a = np.asarray(arr)
     if a.size == 0:
         return np.zeros(0, dtype=np.float32)
+    src_dtype = a.dtype
     if a.ndim == 1:
         mono = a
     elif a.shape[0] <= 8 and a.shape[0] < a.shape[-1]:
@@ -99,12 +100,12 @@ def _to_mono_float(arr: np.ndarray) -> np.ndarray:
     else:
         mono = a.mean(axis=-1)
     mono = np.asarray(mono, dtype=np.float64).reshape(-1)
-    # int paths
-    if arr.dtype == np.int16:
+    # int paths — check source dtype before float cast lost it
+    if src_dtype == np.int16:
         mono = mono / 32768.0
-    elif arr.dtype == np.int32:
+    elif src_dtype == np.int32:
         mono = mono / 2147483648.0
-    elif arr.dtype == np.uint8:
+    elif src_dtype == np.uint8:
         mono = (mono - 128.0) / 128.0
     # already float: assume [-1,1]; if clearly not, scale down
     peak = float(np.max(np.abs(mono))) if mono.size else 0.0
@@ -114,6 +115,42 @@ def _to_mono_float(arr: np.ndarray) -> np.ndarray:
     if peak > 1.5:
         mono = mono / peak
     return mono.astype(np.float32)
+
+
+class _Envelope:
+    """Display meter: instant attack, slow release. Values stay in ~[0, 1]."""
+
+    __slots__ = ("value", "release")
+
+    def __init__(self, release: float = 0.90):
+        self.value = 0.0
+        self.release = float(release)
+
+    def update(self, x: float) -> float:
+        x = abs(float(x) or 0.0)
+        if x >= self.value:
+            self.value = x
+        else:
+            r = self.release
+            self.value = self.value * r + x * (1.0 - r)
+        if self.value < 1e-4:
+            self.value = 0.0
+        return self.value
+
+    def reset(self) -> None:
+        self.value = 0.0
+
+
+def _frame_level(samples: np.ndarray) -> float:
+    """Continuous 0..1 energy for meters (RMS-weighted, not single-sample spike)."""
+    if samples is None or samples.size == 0:
+        return 0.0
+    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    peak = float(np.max(np.abs(x)))
+    # RMS tracks speech better than pure peak between phonemes
+    rms = float(np.sqrt(np.mean(np.square(x)))) if x.size else 0.0
+    # blend: peak for attacks, RMS for body; mild headroom so speech isn't pegged
+    return min(1.0, max(peak * 0.55, rms * 3.0))
 
 
 def _limit(mono: np.ndarray, gain: float = SPEAKER_GAIN, peak: float = SPEAKER_PEAK_LIMIT) -> np.ndarray:
@@ -266,7 +303,15 @@ class SpeakerPlayer:
         self._ready = False
         self._out_channels = 2
         self._frames_in = 0
-        self.last_peak = 0.0  # pre-gain mono peak for visualizer
+        self._env = _Envelope(release=0.91)
+        self._last_audio_ts = 0.0
+        self.last_peak = 0.0  # envelope level for visualizer (0..1)
+
+    def sample_meter(self) -> float:
+        """Envelope level; releases when no remote frames recently."""
+        if self._last_audio_ts and (time.monotonic() - self._last_audio_ts) > 0.05:
+            self.last_peak = self._env.update(0.0)
+        return float(self.last_peak)
 
     def start(self) -> None:
         try:
@@ -330,13 +375,16 @@ class SpeakerPlayer:
             if mono.size == 0:
                 continue
             # skip near-digital-full-scale garbage bursts (decode glitches)
-            peak = float(np.max(np.abs(mono)))
-            if peak > 0.99 and self._frames_in < 5:
+            raw_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+            if raw_peak > 0.99 and self._frames_in < 5:
                 continue
-            # Hold peak briefly so the GUI bar doesn't drop between packets
-            self.last_peak = max(peak, float(self.last_peak) * 0.82)
-            mono = _limit(mono, gain=self._gain, peak=SPEAKER_PEAK_LIMIT)
-            self._ring.write(mono)
+            # Meter from post-gain/limit energy ≈ what you actually hear
+            limited = _limit(mono, gain=self._gain, peak=SPEAKER_PEAK_LIMIT)
+            # normalize so full SPEAKER_PEAK_LIMIT maps to ~1.0 on the bar
+            heard = _frame_level(limited / max(SPEAKER_PEAK_LIMIT, 1e-6))
+            self.last_peak = self._env.update(heard)
+            self._last_audio_ts = time.monotonic()
+            self._ring.write(limited)
             self._frames_in += 1
             if not self._ready and self._ring.size >= SPEAKER_PREROLL:
                 self._ready = True
@@ -344,6 +392,8 @@ class SpeakerPlayer:
     def stop(self) -> None:
         self._ready = False
         self.last_peak = 0.0
+        self._last_audio_ts = 0.0
+        self._env.reset()
         self._ring.clear()
         if self._stream is not None:
             try:
@@ -453,7 +503,8 @@ class InjectableUplinkTrack(MediaStreamTrack):
         self._frames = 0
         self._last_peak_log = 0.0
         self._source = "silence"  # inject | mic | silence
-        self.last_peak = 0.0
+        self._env = _Envelope(release=0.90)
+        self.last_peak = 0.0  # envelope level for visualizer (0..1)
         self.mic_frames = 0
         self.inject_frames = 0
 
@@ -501,29 +552,49 @@ class InjectableUplinkTrack(MediaStreamTrack):
             return take
 
     def _frame_from_base(self, base_fr: AudioFrame) -> np.ndarray:
-        """Normalize any base AudioFrame to float32 mono FRAME_SAMPLES."""
-        arr = base_fr.to_ndarray()
+        """Normalize any base AudioFrame to float32 mono FRAME_SAMPLES @ [-1,1]."""
+        try:
+            arr = base_fr.to_ndarray()
+        except Exception:
+            try:
+                raw = bytes(base_fr.planes[0])
+                arr = np.frombuffer(raw, dtype=np.int16)
+            except Exception:
+                return np.zeros(FRAME_SAMPLES, dtype=np.float32)
+
+        # Prefer format-aware scale: MicrophoneTrack emits s16 mono frames.
+        fmt = ""
+        try:
+            fmt = (base_fr.format.name if base_fr.format else "") or ""
+        except Exception:
+            fmt = ""
+
         if arr.ndim > 1:
-            # planar: (ch, n) or interleaved (n, ch)
             if arr.shape[0] <= 8 and arr.shape[0] < arr.shape[-1]:
                 arr = arr.mean(axis=0)
             else:
                 arr = arr.mean(axis=-1)
-        samples = np.asarray(arr, dtype=np.float32).reshape(-1)
-        # int PCM often arrives as int16/int32 ndarray
-        if samples.dtype == np.int16 or (
-            samples.size and float(np.max(np.abs(samples))) > 1.5
-        ):
+
+        src_dtype = getattr(arr, "dtype", None)
+        samples = np.asarray(arr, dtype=np.float64).reshape(-1)
+
+        if src_dtype == np.int16 or fmt in ("s16", "s16p"):
+            samples = samples / 32768.0
+        elif src_dtype == np.int32 or fmt in ("s32", "s32p"):
+            samples = samples / 2147483648.0
+        else:
             peak = float(np.max(np.abs(samples))) if samples.size else 0.0
-            if peak > 200.0:  # clearly integer PCM
+            if peak > 200.0:
+                # float view of integer PCM
                 samples = samples / (32768.0 if peak <= 32768 * 1.5 else peak)
-            elif base_fr.format and base_fr.format.name in ("s16", "s16p"):
-                samples = samples / 32768.0
+            elif peak > 1.5:
+                samples = samples / peak
+
         if samples.size < FRAME_SAMPLES:
             samples = np.pad(samples, (0, FRAME_SAMPLES - samples.size))
         else:
             samples = samples[:FRAME_SAMPLES]
-        return samples.astype(np.float32)
+        return np.clip(samples, -1.0, 1.0).astype(np.float32)
 
     async def recv(self) -> AudioFrame:
         if self.readyState != "live":
@@ -556,14 +627,15 @@ class InjectableUplinkTrack(MediaStreamTrack):
             samples = np.zeros(FRAME_SAMPLES, dtype=np.float32)
 
         self._source = source
-        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
-        self.last_peak = peak
+        instant = _frame_level(samples)
+        # Always update envelope (incl. silence) so release tracks real audio
+        self.last_peak = self._env.update(instant)
         self._frames += 1
         now = time.monotonic()
         if now - self._last_peak_log >= 2.0:
             self._last_peak_log = now
             print(
-                f"uplink: src={source} peak={peak:.3f} "
+                f"uplink: src={source} peak={instant:.3f} meter={self.last_peak:.3f} "
                 f"mic_frames={self.mic_frames} inject_q={self.inject_queue_samples()}",
                 flush=True,
             )
@@ -578,6 +650,8 @@ class InjectableUplinkTrack(MediaStreamTrack):
         return frame
 
     def stop(self) -> None:
+        self._env.reset()
+        self.last_peak = 0.0
         if self._base is not None:
             try:
                 self._base.stop()

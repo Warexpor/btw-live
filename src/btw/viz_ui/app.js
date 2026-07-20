@@ -23,6 +23,9 @@
     lastSegUp: "",
     lastSegDn: "",
     lastTele: {},
+    // sticky last-good meters — empty/failed reads must not paint IDLE for one frame
+    lastGood: null,
+    missPolls: 0,
   };
 
   const el = {
@@ -99,7 +102,14 @@
   }
 
   function level(peak) {
-    return Math.pow(clamp01(Math.abs(+peak || 0) * 2.4), 0.72);
+    // Backend already sends 0..1 envelope (RMS+peak). Mild perceptual curve only —
+    // old *2.4 made quiet frames dead and spikes peg solid white.
+    return Math.pow(clamp01(Math.abs(+peak || 0)), 0.65);
+  }
+
+  function smoothToward(cur, target, attack, release) {
+    if (target > cur) return cur + (target - cur) * attack;
+    return cur + (target - cur) * release;
   }
 
   function paintSegs(nodes, v, mode, cacheKey) {
@@ -160,22 +170,21 @@
   function sizeOrb() {
     const dpr = window.devicePixelRatio || 1;
     const pane = el.orb.parentElement;
-    const rect = pane.getBoundingClientRect();
-    const cssW = Math.max(200, Math.floor(rect.width));
-    const cssH = Math.max(200, Math.floor(rect.height));
+    // clientWidth/Height — no writing CSS size (that fought flex and flashed)
+    const cssW = Math.max(200, pane.clientWidth | 0);
+    const cssH = Math.max(200, pane.clientHeight | 0);
     const w = Math.floor(cssW * dpr);
     const h = Math.floor(cssH * dpr);
-    // Ignore 1–2px jitter (reflow noise) so the canvas is not reset every frame
+    // Large threshold: setting canvas.width clears the bitmap → one black frame.
+    // Ignore sub-pixel / DPI / scrollbar noise completely.
     const dw = Math.abs(el.orb.width - w);
     const dh = Math.abs(el.orb.height - h);
-    if (dw > 2 || dh > 2 || !el.orb.width) {
+    if ((dw > 12 || dh > 12 || !el.orb.width) && cssW > 0 && cssH > 0) {
       el.orb.width = w;
       el.orb.height = h;
-      el.orb.style.width = cssW + "px";
-      el.orb.style.height = cssH + "px";
       fieldKey = "";
     }
-    return { w: el.orb.width, h: el.orb.height, dpr };
+    return { w: el.orb.width || w, h: el.orb.height || h, dpr };
   }
 
   function paintCosmos(c, w, h, t, live, energy, muted) {
@@ -539,18 +548,50 @@
   }
 
   function speakingHysteresis(want) {
-    // Latch speaking so peaks don't thrash body.speaking every 40ms
+    // Long latch — orb energy only; chrome no longer toggles on this
     const now = performance.now();
     if (want) {
       state.speakLatch = now;
       return true;
     }
-    if (state.speaking && now - state.speakLatch < 450) return true;
+    if (state.speaking && now - state.speakLatch < 700) return true;
     return false;
   }
 
+  function isMeterPayload(m) {
+    return !!(m && typeof m === "object" && m.status);
+  }
+
   function applyMeters(m) {
-    m = m || {};
+    // Drop empty / failed polls — never paint the IDLE "—" frame from a race.
+    if (!isMeterPayload(m)) {
+      state.missPolls += 1;
+      if (state.lastGood && state.missPolls < 8) {
+        // keep last live chrome; only soft-decay levels
+        state.up *= 0.97;
+        state.dn *= 0.97;
+        return;
+      }
+      if (!state.lastGood) m = { status: "idle" };
+      else m = state.lastGood;
+    } else {
+      const st = String(m.status);
+      // One-frame idle/garbage while Live is up: require consecutive non-live
+      if (st !== "live" && st !== "stopped" && state.live) {
+        state.missPolls += 1;
+        if (state.missPolls < 5 && state.lastGood) {
+          m = state.lastGood;
+        } else {
+          state.missPolls = 0;
+          state.lastGood = m;
+        }
+      } else {
+        state.missPolls = 0;
+        state.lastGood = m;
+      }
+    }
+
+    m = m || { status: "idle" };
     const status = String(m.status || "idle");
     const live = status === "live";
     state.live = live;
@@ -560,11 +601,12 @@
 
     const upRaw = level(m.uplink_peak);
     const dnRaw = level(m.downlink_peak);
-    state.up = state.up * 0.55 + upRaw * 0.45;
-    state.dn = state.dn * 0.55 + dnRaw * 0.45;
+    // Fast attack / slow release so bars track speech without blinking
+    state.up = smoothToward(state.up, upRaw, 0.55, 0.18);
+    state.dn = smoothToward(state.dn, dnRaw, 0.55, 0.18);
     if (!live) {
-      state.up *= 0.92;
-      state.dn *= 0.92;
+      state.up *= 0.88;
+      state.dn *= 0.88;
     }
 
     state.histUp.push(state.up);
@@ -577,9 +619,10 @@
     state.muted = muted;
     state.injecting = injecting;
 
-    const wantSpeak = live && state.dn > 0.14 && !muted;
+    const wantSpeak = live && state.dn > 0.08;
     const speaking = speakingHysteresis(wantSpeak);
     state.speaking = speaking;
+    // body.speaking only drives subtle orb-adjacent cues — not chrome hide/show
     if (document.body.classList.contains("speaking") !== speaking) {
       document.body.classList.toggle("speaking", speaking);
     }
@@ -593,13 +636,14 @@
       );
     }
 
-    if (speaking) {
-      setOrbLabel("");
+    // Stable labels — no blank-on-speak thrash
+    if (live && muted) {
+      setOrbLabel("muted", "warn");
     } else if (live && injecting) {
       setOrbLabel("inject", "hot");
-    } else if (live && muted) {
-      setOrbLabel("muted", "warn");
-    } else if (live && state.up > 0.12) {
+    } else if (live && speaking) {
+      setOrbLabel("ai", "hot");
+    } else if (live && state.up > 0.1) {
       setOrbLabel("you");
     } else if (live) {
       setOrbLabel("listen");
@@ -620,22 +664,26 @@
     paintSegs(upSegs, state.up, muted ? "warn" : "normal", "lastSegUp");
     paintSegs(dnSegs, state.dn, "normal", "lastSegDn");
 
-    const tele = {
-      session: m.session_name || "—",
-      profile: m.profile || "—",
-      voice: m.voice || "—",
-      mic: muted ? "muted" : live ? m.uplink_src || "open" : "—",
-      channel: injecting ? "inject" : m.dc_open ? "dc" : live ? "audio" : "—",
-      link: `${m.pc || "—"} / ${m.ice || "—"}`,
-    };
-    for (const k of Object.keys(tele)) {
-      if (state.lastTele[k] !== tele[k]) {
-        state.lastTele[k] = tele[k];
-        setText(el.tele[k], tele[k]);
+    // Only write tele when payload has real session fields — never flash "—"
+    const hasSession = !!(m.session_name || m.profile || m.voice);
+    if (hasSession || !live) {
+      const tele = {
+        session: m.session_name || "—",
+        profile: m.profile || "—",
+        voice: m.voice || "—",
+        mic: muted ? "muted" : live ? m.uplink_src || "open" : "—",
+        channel: injecting ? "inject" : m.dc_open ? "dc" : live ? "audio" : "—",
+        link: `${m.pc || "—"} / ${m.ice || "—"}`,
+      };
+      for (const k of Object.keys(tele)) {
+        if (state.lastTele[k] !== tele[k]) {
+          state.lastTele[k] = tele[k];
+          setText(el.tele[k], tele[k]);
+        }
       }
+      setClass(el.tele.mic, "v" + (muted ? " warn" : ""));
+      setClass(el.tele.channel, "v" + (injecting ? " hot" : ""));
     }
-    setClass(el.tele.mic, "v" + (muted ? " warn" : ""));
-    setClass(el.tele.channel, "v" + (injecting ? " hot" : ""));
 
     const hint = live
       ? "space mute · f focus · esc end"
@@ -659,10 +707,12 @@
     try {
       if (window.pywebview && window.pywebview.api) {
         const m = await window.pywebview.api.get_meters();
-        if (m) {
+        if (isMeterPayload(m)) {
           state.bridge = "pywebview";
           return m;
         }
+        // empty {} from read race — keep sticky
+        if (m && typeof m === "object") return null;
       }
     } catch (_) {}
 
@@ -675,11 +725,12 @@
       const r = await fetch("/meters", { cache: "no-store" });
       if (r.ok) {
         state.bridge = "http";
-        return await r.json();
+        const m = await r.json();
+        return isMeterPayload(m) ? m : null;
       }
     } catch (_) {}
 
-    return { status: "idle" };
+    return null;
   }
 
   async function muteToggle() {
@@ -726,9 +777,9 @@
   async function tick() {
     try {
       const m = await fetchMeters();
-      applyMeters(m);
+      applyMeters(m); // null → sticky last-good, no IDLE flash
     } catch (_) {
-      applyMeters({ status: "idle" });
+      applyMeters(null);
     }
     setTimeout(tick, 50);
   }

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.31 — 2026-07-20
+
+### Fixed
+
+- Viz one-frame **IDLE flash** (chip idle, meta `—`, waiting): sticky last-good meters on empty/failed polls; ignore transient non-live reads while live; `read_meters` retries on Windows file races; canvas bitmap resize threshold raised so DPI/scrollbar noise doesn’t clear the orb for a black frame.
+- Clean Live end no longer leaves ghost `runtime.pid` / undrained control queue; stopped meters clear mute sticky.
+- Docs/skills/preview path aligned to **plain-text DC** inject (not TTS-primary); plugin manifest version matches package; `install.ps1` force-syncs install tree when grok says already installed.
+
+## 0.5.30 — 2026-07-20
+
+### Fixed
+
+- **Voice meters** now track real mic/speaker energy: RMS+peak frame level with attack/release envelope (was single-sample peak → mostly 0 with rare 1.0 spikes). Downlink meters post-gain/limit (what you hear). s16 uplink decode no longer lost dtype before scale.
+- **Viz flash / state thrash**: removed speaking-mode chrome hide (chip/meta/hint opacity); stable orb labels; canvas no longer writes CSS size (absolute fill + bitmap only); smoother UI attack/release and longer seg transitions.
+
 ## 0.5.29 — 2026-07-20
 
 ### Changed

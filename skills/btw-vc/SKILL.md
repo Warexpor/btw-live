@@ -28,7 +28,7 @@ Separate Live voice channel. Not the coding agent.
 | `/btw-session-use` | `btw_session_use` |
 | `/btw-session-delete` | `btw_session_delete` |
 | `/btw-voice` | `btw_list_voices` / `btw_set_voice` |
-| `/btw-topup` / push context | `btw_push_context` (append + live audio) |
+| `/btw-topup` / push context | `btw_push_context` (append + plain-text DC) |
 | reinject prompt | `btw_reinject` |
 | doctor | `btw_doctor` |
 

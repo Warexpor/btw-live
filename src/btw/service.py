@@ -179,7 +179,7 @@ def push_context(context: str, *, append: bool = True) -> dict[str, Any]:
 
     live_ok = False
     if _pid_running():
-        # Speak delta; pass full_context so runtime pack stays consistent
+        # Plain-text DC inject of delta; full_context keeps runtime pack consistent
         push_command(
             "push_context",
             context=delta,
@@ -220,8 +220,10 @@ def preview_instructions(
         "instruction_events": instruction_events(instructions),
         "how_it_works": (
             "Profile system prompt + channel contract + session context "
-            "→ written to instructions.txt → on DC open, session.update + "
-            "bootstrap user item (btw brief). Mid-call: push_context queues DC update."
+            "→ written to instructions.txt → on DC open, one plain-text session "
+            "compact (not Realtime JSON; not TTS unless BTW_AUDIO_BOOT=1). "
+            "Mid-call: push_context appends pack + plain-text DC entry "
+            "(BTW_AUDIO_TOPUP=1 for optional TTS)."
         ),
     }
 

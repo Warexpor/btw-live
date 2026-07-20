@@ -138,6 +138,7 @@ class LiveSession:
         self._publish_status()
 
     def _meter_snapshot(self) -> dict[str, Any]:
+        # last_peak is an attack/release envelope on real audio frames (not raw sample spikes)
         up = (
             float(getattr(self.mic_track, "last_peak", 0.0) or 0.0)
             if self.mic_track
@@ -145,12 +146,12 @@ class LiveSession:
         )
         down = 0.0
         if self.speaker is not None:
-            down = float(getattr(self.speaker, "last_peak", 0.0) or 0.0)
-            # Decay when no remote frames arrive (push_frame holds peak up)
-            try:
-                self.speaker.last_peak = down * 0.88
-            except Exception:
-                pass
+            # sample_meter releases when remote audio stops (no side-effect decay race)
+            sample = getattr(self.speaker, "sample_meter", None)
+            if callable(sample):
+                down = float(sample() or 0.0)
+            else:
+                down = float(getattr(self.speaker, "last_peak", 0.0) or 0.0)
         injecting = False
         uplink_src = None
         mic_frames = 0
@@ -172,8 +173,8 @@ class LiveSession:
             "voice": self.voice,
             "muted": self._muted,
             "injecting": injecting,
-            "uplink_peak": up,
-            "downlink_peak": down,
+            "uplink_peak": min(1.0, max(0.0, up)),
+            "downlink_peak": min(1.0, max(0.0, down)),
             "uplink_src": uplink_src,
             "mic_frames": mic_frames,
             "pc": self.stats.get("pc_state"),
@@ -618,7 +619,8 @@ class LiveSession:
             "session_name": self.session_name,
             "profile": self.profile.name,
             "voice": self.voice,
-            "muted": self._muted,
+            # call ended — don't leave mute sticky on the idle surface
+            "muted": False,
             "injecting": False,
             "uplink_peak": 0.0,
             "downlink_peak": 0.0,

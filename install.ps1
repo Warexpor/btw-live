@@ -71,16 +71,44 @@ function Get-BtwLaunchCmd {
     return $null
 }
 
+function Sync-InstallTree {
+    param([string]$InstallRoot)
+    if (-not $InstallRoot -or -not (Test-Path $InstallRoot)) { return }
+    if ((Resolve-Path $InstallRoot).Path -eq (Resolve-Path $Root).Path) { return }
+    Write-Host "Syncing source into install tree: $InstallRoot"
+    $pairs = @(
+        @{ From = "src\btw"; To = "src\btw" },
+        @{ From = "skills"; To = "skills" },
+        @{ From = "sessions"; To = "sessions" },
+        @{ From = "mcp"; To = "mcp" },
+        @{ From = "assets"; To = "assets" },
+        @{ From = ".claude-plugin"; To = ".claude-plugin" }
+    )
+    foreach ($p in $pairs) {
+        $src = Join-Path $Root $p.From
+        $dst = Join-Path $InstallRoot $p.To
+        if (Test-Path $src) {
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item -Path (Join-Path $src "*") -Destination $dst -Recurse -Force
+        }
+    }
+    foreach ($f in @("CHANGELOG.md", "pyproject.toml", "README.md", "LICENSE")) {
+        $src = Join-Path $Root $f
+        if (Test-Path $src) { Copy-Item $src (Join-Path $InstallRoot $f) -Force }
+    }
+}
+
 $grok = Get-Command grok -ErrorAction SilentlyContinue
 if ($grok) {
     & grok plugin install $Root --trust
     if (-not $NoEnable) { & grok plugin enable btw 2>$null }
 
-    # After grok copies plugin, ensure *install* tree also has its own .venv
+    # After grok install (incl. "already installed"), force-sync source + .venv
     $launch = Get-BtwLaunchCmd
     if ($launch) {
         $installRoot = Split-Path (Split-Path $launch -Parent) -Parent
-        if ($installRoot -and (Test-Path $installRoot) -and ($installRoot -ne $Root)) {
+        if ($installRoot -and (Test-Path $installRoot)) {
+            Sync-InstallTree -InstallRoot $installRoot
             Write-Host "Ensuring .venv on install tree: $installRoot"
             $prev = $Root
             $Root = $installRoot

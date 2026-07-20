@@ -9,9 +9,9 @@ Feed **short curated facts** into the active Live voice session. Not the whole G
 
 ## Flow
 
-1. Build a tight snip (goal, file, error, decision) — prefer ≤500–900 chars for speech.
+1. Build a tight snip (goal, file, error, decision) — prefer ≤500–900 chars.
 2. Call `btw_push_context` with that snip (service **appends** by default).
-3. If Live is running: runtime speaks the delta over the uplink (TTS) and best-effort DC.
+3. If Live is running: runtime injects a plain-text datachannel entry (not TTS unless `BTW_AUDIO_TOPUP=1`).
 4. Confirm in one line: topped up / chars / live_push_queued.
 
 ## Rules

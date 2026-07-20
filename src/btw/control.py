@@ -51,13 +51,23 @@ def write_meters(payload: dict[str, Any]) -> None:
 
 
 def read_meters() -> dict[str, Any]:
+    """Read meters.json; retry once on Windows replace/lock races."""
     p = meters_path()
     if not p.is_file():
         return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    for _ in range(3):
+        try:
+            raw = p.read_text(encoding="utf-8")
+            if not raw or not raw.strip():
+                time.sleep(0.002)
+                continue
+            data = json.loads(raw)
+            if isinstance(data, dict) and data.get("status"):
+                return data
+        except Exception:
+            time.sleep(0.002)
+            continue
+    return {}
 
 
 def mark_live_status_stopped(**extra: Any) -> None:

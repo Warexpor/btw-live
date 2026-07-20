@@ -357,6 +357,18 @@ def start_foreground(
         _log(f"fatal: {e}")
         mark_error(load_state(), str(e))
         return {"ok": False, "error": str(e)}
+    finally:
+        # Clean End (control stop) must not leave a ghost runtime.pid
+        try:
+            pid_path().unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            from .control import clear_commands
+
+            clear_commands()
+        except Exception:
+            pass
 
 
 def mint_smoke() -> dict[str, Any]:
