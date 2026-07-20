@@ -27,10 +27,10 @@ RING_SECONDS = 3
 # Hard safety: never let peaks hit full scale (ear protection)
 SPEAKER_GAIN = 0.28
 SPEAKER_PEAK_LIMIT = 0.40
-# Playout jitter buffer. Logs showed chronic full underruns with 40 ms cushion
-# (u≈8% of pulls, ring stuck at 1–2 frames, drop=0). WebRTC arrives unevenly;
-# starving the PortAudio callback → audible stutters mid-speech.
-SPEAKER_PREROLL = int(SAMPLE_RATE * 0.12)  # 120 ms before first play
+# Playout jitter buffer. After first underrun the ring never rebuilds if we
+# keep playing (clock skew / jitter → just-in-time forever, ring stuck ~1–2
+# frames). Fix: re-preroll after starve + thicker adaptive target.
+SPEAKER_PREROLL = int(SAMPLE_RATE * 0.18)  # 180 ms before first play / rebuffer
 # Crossfade only on real discontinuities (inject↔mic), not every speech frame
 DECLICK_SAMPLES = 64
 # Only treat near-digital jumps as decode glitches (speech legitimately jumps more)
@@ -40,9 +40,11 @@ CLICK_JUMP = 0.85
 SPEAKER_JOIN_JUMP = 0.28
 SPEAKER_JOIN_SAMPLES = 48
 # Steady playout depth + room for network jitter without multi-second lag
-SPEAKER_TARGET = int(SAMPLE_RATE * 0.10)  # ~100 ms
-SPEAKER_HIGH = int(SAMPLE_RATE * 0.18)  # nibble above ~180 ms
-SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.32)  # hard cap ~320 ms
+SPEAKER_TARGET = int(SAMPLE_RATE * 0.15)  # ~150 ms
+SPEAKER_HIGH = int(SAMPLE_RATE * 0.24)  # nibble above ~240 ms
+SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.45)  # hard cap ~450 ms
+SPEAKER_TARGET_MAX = int(SAMPLE_RATE * 0.30)  # adaptive ceiling ~300 ms
+SPEAKER_TARGET_STEP = int(SAMPLE_RATE * 0.04)  # +40 ms after mid-speech underrun
 # Treat "recent remote audio" for underrun diagnostics / silence vs mid-speech
 SPEAKER_ACTIVE_S = 0.25
 
@@ -452,7 +454,8 @@ class SpeakerPlayer:
 
     Cracks often come from (a) ring underruns → hard zeros, (b) decode spikes,
     (c) discontinuous packet / drop joins. We do not invent missing OpenAI
-    audio, but we *do* fade shortfalls and declick real edges only.
+    audio, but we *do* fade shortfalls, re-preroll after starve, and declick
+    real edges only.
     """
 
     def __init__(self, device: Optional[int | str] = None, gain: float = SPEAKER_GAIN):
@@ -469,6 +472,9 @@ class SpeakerPlayer:
         self._env = _Envelope(release=0.91)
         self._last_audio_ts = 0.0
         self.last_peak = 0.0  # envelope level for visualizer (0..1)
+        # adaptive playout depth (grows after mid-speech underruns)
+        self._target = SPEAKER_TARGET
+        self._preroll = SPEAKER_PREROLL
         # de-click state (callback + push path)
         self._last_played = 0.0
         self._last_written = 0.0
@@ -481,6 +487,7 @@ class SpeakerPlayer:
         self.partial_underruns = 0
         self.ring_drops = 0
         self.sd_underflows = 0
+        self.rebuffers = 0  # times we paused to rebuild cushion
 
     def sample_meter(self) -> float:
         """Envelope level; releases when no remote frames recently."""
@@ -493,15 +500,32 @@ class SpeakerPlayer:
             return False
         return (time.monotonic() - self._last_audio_ts) < SPEAKER_ACTIVE_S
 
+    def _high_water(self) -> int:
+        return min(SPEAKER_RING_MAX, self._target + int(SAMPLE_RATE * 0.09))
+
+    def _request_rebuffer(self, *, grow: bool) -> None:
+        """Stop playout until ring rebuilds. Prevents just-in-time stutter trains."""
+        if not self._ready:
+            return
+        self._ready = False
+        self.rebuffers += 1
+        self._need_join = True
+        if grow:
+            self._target = min(SPEAKER_TARGET_MAX, self._target + SPEAKER_TARGET_STEP)
+            self._preroll = max(self._preroll, self._target + FRAME_SAMPLES * 2)
+
     def stats(self) -> dict:
         return {
             "frames_in": self._frames_in,
             "ring": self._ring.size,
+            "target": self._target,
+            "preroll": self._preroll,
             "underruns": self.underruns,
             "silence_underruns": self.silence_underruns,
             "partial_underruns": self.partial_underruns,
             "ring_drops": self.ring_drops,
             "sd_underflows": self.sd_underflows,
+            "rebuffers": self.rebuffers,
             "active": self._audio_active(),
         }
 
@@ -532,7 +556,8 @@ class SpeakerPlayer:
 
             have = player._ring.size
             if not player._ready:
-                if have >= SPEAKER_PREROLL:
+                need = max(player._preroll, player._target)
+                if have >= need:
                     player._ready = True
                 else:
                     outdata.fill(0)
@@ -552,12 +577,17 @@ class SpeakerPlayer:
                         player.underruns += 1
                     else:
                         player.partial_underruns += 1
+                    # Critical: rebuild cushion. Playing just-in-time after first
+                    # underrun leaves ring at 1–2 frames forever (log pattern).
+                    player._request_rebuffer(grow=True)
+                    mono = np.zeros(frames, dtype=np.float32)
+                    last = 0.0
                 else:
                     player.silence_underruns += 1
-                    # Don't invent hold-tone during quiet; zeros are clean silence
-                    if abs(float(player._last_played)) < 1e-3:
-                        mono = np.zeros(frames, dtype=np.float32)
-                        last = 0.0
+                    # After pause, re-preroll so next phrase does not start dry
+                    player._request_rebuffer(grow=False)
+                    mono = np.zeros(frames, dtype=np.float32)
+                    last = 0.0
             # After mid-speech underrun or lag-drop only — not every packet
             if (was_starved or need_join) and not starved and mono.size:
                 mono = _declick_join(
@@ -587,8 +617,8 @@ class SpeakerPlayer:
             dtype="float32",
             blocksize=FRAME_SAMPLES,
             device=self._device,
-            # Slightly above "low": fewer host buffer hiccups; still ~1–2 frames.
-            latency=0.06,
+            # Host buffer room; app jitter buffer is the main cushion.
+            latency=0.08,
             callback=callback,
         )
         self._stream.start()
@@ -633,13 +663,14 @@ class SpeakerPlayer:
             self.last_peak = self._env.update(heard)
             self._last_audio_ts = time.monotonic()
             self._ring.write(limited)
-            # Keep playout near target: trim when high water, hard-cap always
+            # Keep playout near adaptive target
             size = self._ring.size
+            target = self._target
+            high = self._high_water()
             if size > SPEAKER_RING_MAX:
-                dropped = self._ring.drop_to(SPEAKER_TARGET)
-            elif size > SPEAKER_HIGH:
-                # Nibble toward target (one frame per write) — soft catch-up
-                keep = max(SPEAKER_TARGET, size - FRAME_SAMPLES)
+                dropped = self._ring.drop_to(target)
+            elif size > high:
+                keep = max(target, size - FRAME_SAMPLES)
                 dropped = self._ring.drop_to(keep)
             else:
                 dropped = 0
@@ -647,7 +678,8 @@ class SpeakerPlayer:
                 self.ring_drops += 1
                 self._need_join = True
             self._frames_in += 1
-            if not self._ready and self._ring.size >= SPEAKER_PREROLL:
+            need = max(self._preroll, target)
+            if not self._ready and self._ring.size >= need:
                 self._ready = True
 
     def stop(self) -> None:
@@ -658,6 +690,8 @@ class SpeakerPlayer:
         self._last_written = 0.0
         self._starved = False
         self._need_join = False
+        self._target = SPEAKER_TARGET
+        self._preroll = SPEAKER_PREROLL
         self._env.reset()
         self._ring.clear()
         if self._stream is not None:
@@ -700,7 +734,8 @@ def synthesize_speech_wav(text: str, path: str | Path, *, rate: int = 0) -> Path
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    safe = (text or "").replace("'", "''")[:2500]
+    # Room for ~2 min SAPI brief (inject queue is 120s)
+    safe = (text or "").replace("'", "''")[:8000]
     out_ps = str(out).replace("'", "''")
     ps = (
         "Add-Type -AssemblyName System.Speech; "
@@ -745,8 +780,8 @@ def _load_wav_mono_48k(wav_path: str | Path) -> np.ndarray:
     return np.clip(pcm, -1.0, 1.0).astype(np.float32)
 
 
-# Cap TTS inject — boot can run up to ~1 min of SAPI for a dense brief
-INJECT_MAX_SAMPLES = SAMPLE_RATE * 60  # 60s
+# Cap TTS inject — boot can run up to ~2 min of SAPI for a dense brief
+INJECT_MAX_SAMPLES = SAMPLE_RATE * 120  # 120s
 
 
 class InjectableUplinkTrack(MediaStreamTrack):

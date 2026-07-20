@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.53 — 2026-07-20
+
+### Changed
+
+- **Uplink TTS inject window 60s → 120s (2 min):** `INJECT_MAX_SAMPLES`, SAPI text cap, `AUDIO_BRIEF_MAX` / plain boot 6400 chars.
+
+## 0.5.52 — 2026-07-20
+
+### Fixed
+
+- **Leftover mid-speech stutters:** after first underrun the ring stayed just-in-time (~1–2 frames forever — log pattern). **Re-preroll** on mid-speech starve and after pauses; **adaptive target** grows +40 ms per hit (up to ~300 ms). Base cushion ~150–180 ms, cap ~450 ms. One short rebuild gap instead of a stutter train. Log: `rb=` rebuffers, `tgt=` target samples.
+
 ## 0.5.51 — 2026-07-20
 
 ### Fixed

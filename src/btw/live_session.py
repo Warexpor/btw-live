@@ -44,8 +44,8 @@ from .session_json import (
 log = logging.getLogger("btw.live")
 
 # Spoken inject caps — product path is uplink TTS (DC ignored by Wingman).
-# Keep under INJECT_MAX_SAMPLES (~60s); denser pack still fits in one brief.
-AUDIO_BRIEF_MAX = 3200  # ~1 min of SAPI room for real session pack
+# Keep under INJECT_MAX_SAMPLES (~120s); denser pack still fits in one brief.
+AUDIO_BRIEF_MAX = 6400  # ~2 min of SAPI room for real session pack
 AUDIO_TOPUP_MAX = 1200
 # No artificial settle after PC connect (speak as soon as connected)
 AUDIO_BOOT_SETTLE_S = 0.0
@@ -798,6 +798,8 @@ class LiveSession:
                                     f"pu={st.get('partial_underruns', 0)} "
                                     f"drop={st.get('ring_drops', 0)} "
                                     f"sd_uf={st.get('sd_underflows', 0)} "
+                                    f"rb={st.get('rebuffers', 0)} "
+                                    f"tgt={st.get('target', 0)} "
                                     f"ring={st.get('ring', 0)}"
                                 )
                         except Exception as e:

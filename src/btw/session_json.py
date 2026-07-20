@@ -72,7 +72,7 @@ def build_voice_session_payload(
 
 # Soft caps — brief enough for DC, enough for full agent picture
 PLAIN_ENTRY_MAX = 4000  # hard ceiling (compat)
-PLAIN_BOOT_MAX = 3200  # one boot message after VC init (match spoken budget)
+PLAIN_BOOT_MAX = 6400  # one boot message after VC init (match spoken budget / 2 min)
 PLAIN_TOPUP_MAX = 1200  # one mid-call "what's new" message
 
 

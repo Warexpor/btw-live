@@ -89,7 +89,7 @@ ChatGPT **token / mint / conversation** HTTP can go through a SOCKS or HTTP prox
 - Agent must **not** call `btw_push_context` unless the user explicitly top-ups.
 - Conversation resume bind is best-effort (hydrate proven; mint bind fields may fall back unbound on 4xx).
 - HTTP proxy does **not** fix mid-speech audio; media is WebRTC direct unless OS TUN.
-- Downlink uses a ~100–120 ms playout jitter buffer (cap ~320 ms). Too-thin buffers caused mid-speech underrun stutters; see CHANGELOG 0.5.51.
+- Downlink uses a ~150–180 ms playout jitter buffer (adaptive up to ~300 ms target, cap ~450 ms) with re-preroll after underruns. Rare residual glitches can still come from real packet loss (cannot invent audio).
 - Not full ChatGPT UI feature parity (widgets, etc.).
 - Cookies = full account access — treat as secrets.
 
