@@ -218,26 +218,36 @@ def session_sync() -> dict[str, Any]:
             "error": "no conversation_id bound — use btw_session_bind first",
             "session": active.name,
         }
-    client = ChatGPTClient()
-    conv = client.get_conversation(cid)
-    summary = conversation_summary(conv)
-    turns = extract_voice_turns(conv)
-    ss.update_active(
-        conversation_title=str(summary.get("title") or ""),
-        parent_message_id=str(summary.get("parent_message_id") or ""),
-    )
-    # Cache resume snip for next start
-    snip = format_resume_snip(turns)
-    (data_dir() / "resume_snip.txt").write_text(snip, encoding="utf-8")
-    return {
-        "ok": True,
-        "session": active.name,
-        "conversation_id": cid,
-        "conversation_title": summary.get("title"),
-        "turn_count": summary.get("turn_count"),
-        "preview": (summary.get("preview") or "")[:240],
-        "resume_chars": len(snip),
-    }
+    try:
+        client = ChatGPTClient()
+        conv = client.get_conversation(cid)
+        summary = conversation_summary(conv)
+        turns = extract_voice_turns(conv)
+        ss.update_active(
+            conversation_title=str(summary.get("title") or ""),
+            parent_message_id=str(summary.get("parent_message_id") or ""),
+        )
+        # Cache resume snip for next start
+        snip = format_resume_snip(turns)
+        (data_dir() / "resume_snip.txt").write_text(snip, encoding="utf-8")
+        return {
+            "ok": True,
+            "session": active.name,
+            "conversation_id": cid,
+            "conversation_title": summary.get("title"),
+            "turn_count": summary.get("turn_count"),
+            "preview": (summary.get("preview") or "")[:240],
+            "resume_chars": len(snip),
+        }
+    except Exception as e:
+        # Peer pattern to session_bind: soft fail, keep prior bind
+        return {
+            "ok": False,
+            "error": str(e),
+            "session": active.name,
+            "conversation_id": cid,
+            "conversation_title": active.conversation_title or None,
+        }
 
 
 def hydrate_resume_for_active() -> dict[str, Any]:
@@ -373,11 +383,10 @@ def preview_instructions(
         "session_payload": build_voice_session_payload(prof),
         "instruction_events": instruction_events(instructions),
         "how_it_works": (
-            "After VC init: one plain-text session brief (facts + role). "
-            "Mid-call /btw-topup: appends pack locally + one plain-text "
-            "'what's new' DC message only (not full history). "
-            "Product inject = uplink TTS (default). Disable with BTW_NO_AUDIO_INJECT=1. "
-            "DC plain is best-effort only; Realtime JSON only if BTW_DC_REALTIME=1."
+            "Product inject = uplink TTS after PC connect (session brief) and on "
+            "/btw-topup (delta only, pack appends). Disable with BTW_NO_AUDIO_INJECT=1. "
+            "Plain DC send is best-effort only (channel often closes fast). "
+            "Realtime JSON only if BTW_DC_REALTIME=1."
         ),
     }
 

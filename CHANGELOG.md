@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.45 — 2026-07-20
+
+### Fixed
+
+- **Docs/MCP/skills lag:** product inject is uplink TTS (not plain-text DC). README, SAFE_DOCS, MCP tool blurbs, preview copy, hub + `/btw-vc` tables, status skill fields aligned. Session bind/fresh/sync listed in hub and README slash table.
+- **`session_sync` error path:** peer to `session_bind` — soft-fail with `ok: false` + error instead of raising on fetch failure.
+
+### Changed
+
+- Feature backlog: mark viz/inject/bind shipped; suggested build order starts at Live HUD.
+
 ## 0.5.44 — 2026-07-20
 
 ### Changed

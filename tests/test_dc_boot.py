@@ -1,4 +1,4 @@
-"""Unit tests for deferred plain-text boot inject (no real WebRTC)."""
+"""Unit tests for plain-text DC boot inject helper (best-effort; no real WebRTC)."""
 from __future__ import annotations
 
 import asyncio

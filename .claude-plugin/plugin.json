@@ -1,6 +1,6 @@
 {
   "name": "btw",
-  "version": "0.5.44",
+  "version": "0.5.45",
   "description": "ChatGPT Live voice for Grok Build via /btw-vc — standalone mint+WebRTC, webview surface",
   "author": {
     "name": "amicu"

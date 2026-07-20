@@ -108,9 +108,10 @@ def _clip_plain(text: str, limit: int = PLAIN_ENTRY_MAX) -> str:
 
 
 def plain_boot_message(instructions: str, context: str = "") -> str:
-    """Exactly one plain-text DC payload for call start (product path).
+    """Exactly one plain-text DC payload for call start (best-effort only).
 
-    Brief structured UTF-8 — not JSON, not multi-frame.
+    Product inject is uplink TTS (`spoken_bootstrap`). This string is still
+    sent on open DC when possible. Brief structured UTF-8 — not multi-frame.
     Prefers compact role + session context pack over dumping a huge assemble.
     """
     ins = _normalize_snip(instructions)
@@ -144,10 +145,10 @@ def plain_boot_entries(instructions: str, context: str = "") -> list[str]:
 
 
 def plain_topup_message(delta: str) -> str:
-    """Exactly one plain-text DC payload for mid-call top-up (what's new only).
+    """Exactly one plain-text DC payload for mid-call top-up (best-effort only).
 
-    Same mechanism as boot: single structured UTF-8 string, one channel.send.
-    Does not re-send full session history — only the delta (new facts).
+    Product top-up is uplink TTS (`spoken_topup`). This is a single structured
+    UTF-8 string for one channel.send when DC is still open. Delta only.
     """
     d = _normalize_snip(delta)
     if not d:

@@ -15,11 +15,12 @@ See [docs/SAFE_DOCS.md](docs/SAFE_DOCS.md) for how we write docs going forward.
 | Piece | Role |
 |-------|------|
 | `/btw-vc` | Start Live-style voice for the active session pack |
-| Sessions | Named packs: profile + context + optional voice |
+| Sessions | Named packs: profile + context + optional voice + optional ChatGPT bind |
 | Mute | Mic mute without ending the call |
 | Voice | Speak voice id at mint (e.g. maple) |
-| Context | Profile + short pack; plain-text datachannel brief on start |
-| `/btw-topup` | Mid-call curated fact snip (append + plain-text DC inject) |
+| Context | Profile + short pack; spoken on mic uplink (SAPI TTS) after connect |
+| `/btw-topup` | Mid-call curated fact snip (append pack + uplink TTS delta) |
+| Resume | `/btw-session-bind` → hydrate prior turns + mint with `conversation_id` |
 | `/btw-viz` | Second-monitor live surface (WebView UI, levels + mute/stop) |
 
 Not a second coding agent. Side channel only.
@@ -52,6 +53,7 @@ Or `/btw-cookies` (never commit that file).
 | `/btw-topup` | mid-call context snip |
 | `/btw-viz` | voice visualizer GUI |
 | `/btw-sessions` / `session-new` / `use` / `delete` | packs |
+| `/btw-session-bind` / `fresh` / `sync` | ChatGPT conversation resume |
 | `/btw-voice` | list/set speak voice |
 | `/btw-cookies` | import or clear local cookies |
 | `/btw-status` / `/btw-doctor` | health |
@@ -68,7 +70,8 @@ python -m btw.runtime stop
 ## Limits
 
 - Unofficial; endpoints and behavior can change without notice.
-- Session context is plain-text datachannel entries on start/top-up; optional TTS via `BTW_AUDIO_BOOT` / `BTW_AUDIO_TOPUP`.
+- Product context inject is **uplink TTS** on start/top-up (Wingman hears audio). Disable with `BTW_NO_AUDIO_INJECT=1`. Plain DC is best-effort only.
+- Conversation resume bind is best-effort (hydrate proven; mint bind fields may fall back unbound on 4xx).
 - Not full ChatGPT UI feature parity (widgets, etc.).
 - Cookies = full account access — treat as secrets.
 

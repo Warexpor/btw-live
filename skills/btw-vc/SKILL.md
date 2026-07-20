@@ -27,6 +27,9 @@ Separate Live voice channel. Not the coding agent.
 | `/btw-session-new` | `btw_session_new` |
 | `/btw-session-use` | `btw_session_use` |
 | `/btw-session-delete` | `btw_session_delete` |
+| `/btw-session-bind` | `btw_session_bind` (uuid or chatgpt.com URL) |
+| `/btw-session-fresh` | `btw_session_fresh` |
+| `/btw-session-sync` | `btw_session_sync` |
 | `/btw-voice` | `btw_list_voices` / `btw_set_voice` |
 | `/btw-topup` / push context | `btw_push_context` (append pack + uplink TTS delta) |
 | reinject prompt | `btw_reinject` |

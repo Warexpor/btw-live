@@ -18,6 +18,9 @@ description: btw hub for Grok Build. Voice Live is /btw-vc — use that skill fo
 | `/btw-session-new` | create pack |
 | `/btw-session-use` | switch pack |
 | `/btw-session-delete` | delete pack |
+| `/btw-session-bind` | bind ChatGPT conversation_id (resume) |
+| `/btw-session-fresh` | clear conversation bind |
+| `/btw-session-sync` | refresh bound conversation metadata |
 | `/btw-voice` | list/set speak voice |
 | `/btw-cookies` | swap/clear ChatGPT cookies |
 | `/btw-status` | btw-status |

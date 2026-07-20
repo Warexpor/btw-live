@@ -9,7 +9,7 @@ Priority is a suggestion only — reorder when building.
 
 ## Active direction
 
-### [x] Voice visualizer + second-monitor surface (0.5.14–0.5.16)
+### [x] Voice visualizer + second-monitor surface (0.5.14–0.5.16, calm/transitions 0.5.43–0.5.44)
 - [x] WebView2 (pywebview) modern HTML surface; tk fallback
 - [x] Tall always-on-top window for side display
 - [x] xAI void canvas: hairline cards, pill CTAs, mono telemetry
@@ -17,7 +17,16 @@ Priority is a suggestion only — reorder when building.
 - [x] Session / voice / mic / pc·ice telemetry grid
 - [x] Mute / End call + SPACE / ESC; inject + mute states
 - [x] Launch with `/btw-vc` and/or `/btw-viz`; `--demo` shell
-- [x] Separate process + `meters.json` ~20 Hz
+- [x] Separate process + `meters.json` (~10–20 Hz)
+- [x] AI-only orb pulse; calm speech breath; continuous mode mixes
+
+### [x] ChatGPT conversation bind + resume (0.5.41)
+- [x] Named sessions store `conversation_id` / title / parent
+- [x] `/btw-session-bind` · `fresh` · `sync` + MCP tools
+- [x] Hydrate resume snip → uplink TTS brief; mint bind fields with unbound retry
+
+### [x] Product inject path = uplink TTS (0.5.36+)
+- [x] Boot / top-up spoken on mic uplink (DC plain best-effort only)
 
 ---
 
@@ -85,9 +94,8 @@ Global mute / topup / stop (tray or OS hotkeys) while staying in the IDE. Outsid
 
 ## Suggested build order (if nothing else pulls)
 
-1. Voice visualizer + GUI (active direction)
-2. Live HUD line (cheap presence)
-3. Push-to-talk
-4. Scene packs + sticky last session
-5. “What I told her” + auto-topup
-6. Soft end / presets / recap / hotkeys as appetite allows
+1. Live HUD line (cheap presence)
+2. Push-to-talk
+3. Scene packs + sticky last session
+4. “What I told her” + auto-topup
+5. Soft end / presets / recap / hotkeys as appetite allows

@@ -123,7 +123,7 @@ TOOLS = [
     },
     {
         "name": "btw_push_context",
-        "description": "Set context pack on active session (btw-style). If live, also inject over DC.",
+        "description": "Set/append context pack on active session. If live, queue uplink TTS top-up (delta).",
         "inputSchema": {
             "type": "object",
             "properties": {"context": {"type": "string"}},
@@ -171,7 +171,7 @@ TOOLS = [
     },
     {
         "name": "btw_reinject",
-        "description": "Re-send system/context instructions on open datachannel.",
+        "description": "Re-send session brief: uplink TTS + best-effort plain DC if open.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
