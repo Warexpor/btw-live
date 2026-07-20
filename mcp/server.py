@@ -213,6 +213,27 @@ TOOLS = [
         "description": "Close the voice visualizer window.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "btw_proxy",
+        "description": (
+            "HTTP proxy for ChatGPT mint/token/hydrate. "
+            "action: status|on|off|auto|toggle. Optional url (socks5h://host:port). "
+            "WebRTC media is never proxied here."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "status|on|off|auto|toggle (default status)",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Optional proxy URL when action=on (e.g. socks5h://127.0.0.1:10808)",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -292,6 +313,13 @@ def handle_tool(name: str, args: dict) -> dict:
             return _ok(service.open_viz())
         if name == "btw_viz_close":
             return _ok(service.close_viz())
+        if name == "btw_proxy":
+            return _ok(
+                service.proxy_control(
+                    args.get("action") or "status",
+                    url=args.get("url"),
+                )
+            )
         return _err(f"unknown tool {name}")
     except Exception as e:
         return _err(f"{type(e).__name__}: {e}")

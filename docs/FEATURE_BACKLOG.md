@@ -27,6 +27,15 @@ Priority is a suggestion only — reorder when building.
 
 ### [x] Product inject path = uplink TTS (0.5.36+)
 - [x] Boot / top-up spoken on mic uplink (DC plain best-effort only)
+- [x] No unprompted mid-call push (explicit `/btw-topup` only)
+
+### [x] HTTP proxy for ChatGPT API (0.5.49–0.5.50)
+- [x] Auto system / env / `BTW_PROXY`; persist via `proxy.json`
+- [x] `/btw-proxy` + MCP `btw_proxy` (on/off/auto/toggle)
+- [x] Media remains WebRTC direct (TUN out of scope here)
+
+### [x] Speaker path harden (0.5.47–0.5.49)
+- [x] Partial underrun fade-hold, join declick, low artificial lag
 
 ---
 

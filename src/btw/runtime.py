@@ -69,6 +69,13 @@ def doctor() -> dict[str, Any]:
             out[mod] = f"missing: {e}"
 
     try:
+        from .proxy import proxy_info
+
+        out["proxy"] = proxy_info()
+    except Exception as e:
+        out["proxy"] = {"enabled": False, "error": str(e)}
+
+    try:
         ch = cookie_mod.load_cookie_header()
         out["cookies"] = "ok" if "session-token" in ch else "no_session_token"
         out["cookie_len"] = len(ch)

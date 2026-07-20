@@ -27,8 +27,8 @@ RING_SECONDS = 3
 # Hard safety: never let peaks hit full scale (ear protection)
 SPEAKER_GAIN = 0.28
 SPEAKER_PEAK_LIMIT = 0.40
-# Startup buffer — thin enough for low lag, thick enough to ride 1–2 late packets
-SPEAKER_PREROLL = int(SAMPLE_RATE * 0.10)  # 100 ms
+# Minimal playout cushion (user: no helpful artificial lag)
+SPEAKER_PREROLL = int(SAMPLE_RATE * 0.04)  # 40 ms (~2 frames)
 # Crossfade only on real discontinuities (inject↔mic), not every speech frame
 DECLICK_SAMPLES = 64
 # Only treat near-digital jumps as decode glitches (speech legitimately jumps more)
@@ -36,10 +36,10 @@ CLICK_JUMP = 0.85
 # Post-gain speaker joins (levels ~0.4 max): lower bar than full-scale uplink
 SPEAKER_JOIN_JUMP = 0.08
 SPEAKER_JOIN_SAMPLES = 48
-# Adaptive playout: trim backlog when high so lag doesn't sit near hard cap
-SPEAKER_TARGET = int(SAMPLE_RATE * 0.12)  # ~120 ms steady
-SPEAKER_HIGH = int(SAMPLE_RATE * 0.20)  # trim when above ~200 ms
-SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.30)  # hard cap ~300 ms
+# Keep ring tight — nibble backlog hard
+SPEAKER_TARGET = int(SAMPLE_RATE * 0.04)  # ~40 ms
+SPEAKER_HIGH = int(SAMPLE_RATE * 0.08)  # trim above ~80 ms
+SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.15)  # hard cap ~150 ms
 
 
 class _FloatRing:
@@ -566,8 +566,7 @@ class SpeakerPlayer:
             dtype="float32",
             blocksize=FRAME_SAMPLES,
             device=self._device,
-            # "low" underruns under WebRTC jitter; ~80ms OS buffer is still snappy
-            latency=0.08,
+            latency="low",
             callback=callback,
         )
         self._stream.start()

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.50 — 2026-07-20
+
+### Added
+
+- **`/btw-proxy`** skill + MCP `btw_proxy`: `status|on|off|auto|toggle` [url]. Preference in `proxy.json` (survives restarts). HTTP mint/token only; media still direct.
+
+### Changed
+
+- **Docs polish:** README slash table + proxy section + limits; SAFE_DOCS allow-list; FEATURE_BACKLOG mark proxy/inject/speaker shipped; doctor skill reports proxy; PROTOCOL notes HTTP proxy vs media.
+
+## 0.5.49 — 2026-07-20
+
+### Added
+
+- **HTTP proxy:** ChatGPT token/mint/hydrate via `BTW_PROXY` / `HTTP(S)_PROXY` / Windows system proxy as **socks5h** (v2rayN/xray `127.0.0.1:10808`). Doctor + runtime log show proxy. `BTW_PROXY=0` = direct. **WebRTC media is still direct** (OS TUN if media must proxy).
+
+### Changed
+
+- **No artificial playout lag:** preroll/target ~40ms, high ~80ms, cap ~150ms, PortAudio `latency=low`. Audio boot settle 0; shorter DC defer timeouts.
+- **Default: no unprompted context push.** Agent only calls `btw_push_context` on explicit `/btw-topup`. Skills `btw-vc`, `btw-topup`, `btw` updated to reflect this rule. Launch.cmd reverted — no `BTW_NO_AUDIO_INJECT` (audio works for manual topups).
+
 ## 0.5.48 — 2026-07-20
 
 ### Fixed

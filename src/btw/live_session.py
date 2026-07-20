@@ -47,8 +47,8 @@ log = logging.getLogger("btw.live")
 # Keep under INJECT_MAX_SAMPLES (~60s); denser pack still fits in one brief.
 AUDIO_BRIEF_MAX = 3200  # ~1 min of SAPI room for real session pack
 AUDIO_TOPUP_MAX = 1200
-# Wait after PC connected before speaking brief (let media settle)
-AUDIO_BOOT_SETTLE_S = 0.45
+# No artificial settle after PC connect (speak as soon as connected)
+AUDIO_BOOT_SETTLE_S = 0.0
 
 # Product DC label for standalone mint (stable multi-minute sessions).
 DC_LABEL = "oai-events"
@@ -57,10 +57,10 @@ DC_LABEL = "oai-events"
 # Keep constant for opt-in experiments only (BTW_DC_NEGOTIATED=1).
 DC_NEGOTIATED_ID = 0
 # Deferred path only (BTW_DC_DEFER_BOOT=1): wait inbound or this timeout
-BOOT_INJECT_WAIT_S = 0.75
-BOOT_INJECT_SETTLE_S = 0.05
+BOOT_INJECT_WAIT_S = 0.4
+BOOT_INJECT_SETTLE_S = 0.0
 # One retry if first send returned 0 while channel still open
-BOOT_INJECT_RETRY_S = 0.15
+BOOT_INJECT_RETRY_S = 0.08
 
 
 def _log(msg: str) -> None:
@@ -601,7 +601,8 @@ class LiveSession:
                 await asyncio.sleep(0.05)
             else:
                 _log("audio boot: PC never connected — speaking anyway")
-            await asyncio.sleep(AUDIO_BOOT_SETTLE_S)
+            if AUDIO_BOOT_SETTLE_S > 0:
+                await asyncio.sleep(AUDIO_BOOT_SETTLE_S)
         except asyncio.CancelledError:
             return
         if self._audio_boot_done or self._closed.is_set():
@@ -725,6 +726,16 @@ class LiveSession:
         self._audio_boot_done = False
         self._audio_boot_task = None
         self._dc_first_inbound = asyncio.Event()
+        try:
+            from .proxy import proxy_info
+
+            pi = proxy_info()
+            _log(
+                f"proxy http={pi.get('url') or 'direct'} "
+                f"(media=WebRTC direct unless OS TUN)"
+            )
+        except Exception as e:
+            _log(f"proxy info err: {e}")
         _log(f"auth backend={self.client.backend} …")
         token = self.client.fetch_access_token()
         _log(f"accessToken ok len={len(token)}")

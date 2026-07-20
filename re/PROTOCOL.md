@@ -105,7 +105,8 @@ btw named sessions store `conversation_id`. On start:
 2. **Auth path is not bare-HTTP friendly:** same cookies get **CF 403** from Python; need browser/CDP TLS context or full CF clearance.
 3. **Datachannel** (browser JS, 2026-07-20 HAR assets): `createDataChannel("", {negotiated:true, id:0})` — empty label, negotiated id **0**. HAR never records DC payloads; use a console hook on `RTCDataChannel.send` for frames.
 4. **Grok `/btw-vc` (standalone):** local aiortc + HTTP mint; **primary DC = `oai-events`**. Product context inject is **uplink TTS** after PC connected (plain DC is best-effort only — Wingman does not treat plain UTF-8 as session facts). `BTW_NO_AUDIO_INJECT=1` to disable. Optional headless token harvest if CF blocks curl_cffi. See `src/btw/live_session.py`.
-5. **Docs:** public framing in `docs/SAFE_DOCS.md` / root README.
+5. **HTTP proxy:** token/mint/hydrate may use SOCKS/HTTP (`/btw-proxy`, `proxy.json`, `BTW_PROXY`). WebRTC media is not proxied by the app. See `src/btw/proxy.py`.
+6. **Docs:** public framing in `docs/SAFE_DOCS.md` / root README.
 
 ## Local artifacts (gitignored)
 

@@ -10,6 +10,7 @@ from typing import Any
 
 from . import cookies as cookie_mod
 from .paths import data_dir
+from .proxy import proxy_dict
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -65,15 +66,30 @@ def _save_token_cache(token: str, expires_at: float | None = None) -> None:
 def _cffi_get(url: str, headers: dict, impersonate: str):
     from curl_cffi import requests as crequests
 
-    return crequests.get(url, headers=headers, timeout=45, impersonate=impersonate)
+    kw: dict = {
+        "headers": headers,
+        "timeout": 45,
+        "impersonate": impersonate,
+    }
+    px = proxy_dict()
+    if px:
+        kw["proxies"] = px
+    return crequests.get(url, **kw)
 
 
 def _cffi_post(url: str, headers: dict, files: dict, impersonate: str):
     from curl_cffi import requests as crequests
 
-    return crequests.post(
-        url, headers=headers, files=files, timeout=60, impersonate=impersonate
-    )
+    kw: dict = {
+        "headers": headers,
+        "files": files,
+        "timeout": 60,
+        "impersonate": impersonate,
+    }
+    px = proxy_dict()
+    if px:
+        kw["proxies"] = px
+    return crequests.post(url, **kw)
 
 
 def _playwright_access_token(cookie_header: str) -> str:
@@ -81,14 +97,22 @@ def _playwright_access_token(cookie_header: str) -> str:
     from playwright.sync_api import sync_playwright
 
     from .cookie_parse import cookie_header_to_playwright
+    from .proxy import resolve_proxy_url
+
+    launch_kw: dict = {"headless": True}
+    px = resolve_proxy_url()
+    if px:
+        # Playwright wants server like socks5://host:port
+        server = px.replace("socks5h://", "socks5://")
+        launch_kw["proxy"] = {"server": server}
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(**launch_kw)
         ctx = browser.new_context(user_agent=UA)
         ctx.add_cookies(cookie_header_to_playwright(cookie_header))
         page = ctx.new_page()
         page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=120_000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(500)
         for _ in range(12):
             probe = page.evaluate(
                 """async () => {
@@ -119,7 +143,7 @@ def _playwright_access_token(cookie_header: str) -> str:
                         exp_at = None
                 _save_token_cache(tok, exp_at)
                 return tok
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(500)
         browser.close()
     raise RuntimeError("playwright token fallback failed (CF or cookies)")
 
@@ -241,7 +265,9 @@ class ChatGPTClient:
         try:
             import requests
 
-            r = requests.get(url, headers=headers, timeout=45)
+            r = requests.get(
+                url, headers=headers, timeout=45, proxies=proxy_dict()
+            )
             hdrs = {k.lower(): v for k, v in r.headers.items()}
             return int(r.status_code), r.text or "", hdrs
         except Exception as e:
@@ -396,6 +422,7 @@ class ChatGPTClient:
                 headers=headers,
                 files=files,
                 timeout=60,
+                proxies=proxy_dict(),
             )
             body = r.text or ""
             if r.status_code in (200, 201) and "v=0" in body:

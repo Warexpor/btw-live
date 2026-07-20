@@ -18,7 +18,8 @@ Not the whole Grok chat. Not a second full session brief.
 
 ## Rules
 
-- **One spoken top-up** per call. No multi-frame dump of session history.
+- **Only on explicit user request.** Do not call `btw_push_context` unprompted. The user types `/btw-topup` or explicitly asks "top up" — otherwise keep quiet.
+- **One top-up** per call. No multi-frame dump of session history.
 - Brief but complete picture of the *delta* (agent already has boot brief + prior top-ups).
 - Curated only. No secrets, cookies, tokens, giant logs.
 - Do not restart Live for a top-up.

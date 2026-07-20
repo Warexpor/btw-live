@@ -18,8 +18,8 @@ Apply this whenever README, skill text, marketing, or install docs are written.
 ## What docs may describe
 
 - Architecture at a high level (auth → mint → WebRTC).
-- Install, slash commands, sessions, mute, voice pick.
-- Honest limits (uplink TTS context inject; DC best-effort; cookie expiry; not full ChatGPT UI parity).
+- Install, slash commands, sessions, mute, voice pick, conversation bind, HTTP proxy toggle.
+- Honest limits (uplink TTS context inject; DC best-effort; no unprompted context push; HTTP proxy ≠ media; cookie expiry; not full ChatGPT UI parity).
 
 ## What docs should avoid
 

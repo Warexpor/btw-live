@@ -583,6 +583,13 @@ def doctor() -> dict[str, Any]:
     return d
 
 
+def proxy_control(action: str = "status", url: str | None = None) -> dict[str, Any]:
+    """HTTP proxy on/off/auto for ChatGPT mint/token. Media stays direct."""
+    from .proxy import set_proxy
+
+    return set_proxy(action or "status", url=url)
+
+
 def import_cookies(raw_header: str) -> dict[str, Any]:
     raw = (raw_header or "").strip()
     if not raw or "=" not in raw:
