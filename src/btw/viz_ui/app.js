@@ -10,10 +10,19 @@
     histDn: new Array(HISTORY).fill(0),
     muted: false,
     live: false,
+    injecting: false,
     speaking: false,
+    speakLatch: 0,
     focus: false,
     t0: performance.now(),
     bridge: "file",
+    lastStatus: "",
+    lastMuteLabel: "",
+    lastHint: "",
+    lastOrb: "",
+    lastSegUp: "",
+    lastSegDn: "",
+    lastTele: {},
   };
 
   const el = {
@@ -93,21 +102,25 @@
     return Math.pow(clamp01(Math.abs(+peak || 0) * 2.4), 0.72);
   }
 
-  function paintSegs(nodes, v, mode) {
+  function paintSegs(nodes, v, mode, cacheKey) {
     const lit = Math.round(clamp01(v) * SEGS);
+    const key = mode + ":" + lit;
+    if (state[cacheKey] === key) return;
+    state[cacheKey] = key;
     for (let i = 0; i < SEGS; i++) {
       const n = nodes[i];
-      n.className = "seg";
+      let cls = "seg";
       if (i < lit) {
-        n.classList.add("on");
+        cls += " on";
         if (mode === "warn") {
-          n.classList.add(i > SEGS * 0.7 ? "warn-peak" : "warn");
+          cls += i > SEGS * 0.7 ? " warn-peak" : " warn";
         } else if (i > SEGS * 0.85) {
-          n.classList.add("peak");
+          cls += " peak";
         } else if (i > SEGS * 0.5) {
-          n.classList.add("hot");
+          cls += " hot";
         }
       }
+      if (n.className !== cls) n.className = cls;
     }
   }
 
@@ -152,7 +165,10 @@
     const cssH = Math.max(200, Math.floor(rect.height));
     const w = Math.floor(cssW * dpr);
     const h = Math.floor(cssH * dpr);
-    if (el.orb.width !== w || el.orb.height !== h) {
+    // Ignore 1–2px jitter (reflow noise) so the canvas is not reset every frame
+    const dw = Math.abs(el.orb.width - w);
+    const dh = Math.abs(el.orb.height - h);
+    if (dw > 2 || dh > 2 || !el.orb.width) {
       el.orb.width = w;
       el.orb.height = h;
       el.orb.style.width = cssW + "px";
@@ -507,8 +523,30 @@
   }
 
   function setOrbLabel(text, cls) {
+    const key = text + "|" + (cls || "");
+    if (state.lastOrb === key) return;
+    state.lastOrb = key;
     el.orbLabel.textContent = text;
     el.orbLabel.className = "orb-label" + (cls ? " " + cls : "");
+  }
+
+  function setText(node, value) {
+    if (node && node.textContent !== value) node.textContent = value;
+  }
+
+  function setClass(node, value) {
+    if (node && node.className !== value) node.className = value;
+  }
+
+  function speakingHysteresis(want) {
+    // Latch speaking so peaks don't thrash body.speaking every 40ms
+    const now = performance.now();
+    if (want) {
+      state.speakLatch = now;
+      return true;
+    }
+    if (state.speaking && now - state.speakLatch < 450) return true;
+    return false;
   }
 
   function applyMeters(m) {
@@ -516,15 +554,17 @@
     const status = String(m.status || "idle");
     const live = status === "live";
     state.live = live;
-    document.body.classList.toggle("live", live);
+    if (document.body.classList.contains("live") !== live) {
+      document.body.classList.toggle("live", live);
+    }
 
     const upRaw = level(m.uplink_peak);
     const dnRaw = level(m.downlink_peak);
-    state.up = state.up * 0.5 + upRaw * 0.5;
-    state.dn = state.dn * 0.5 + dnRaw * 0.5;
+    state.up = state.up * 0.55 + upRaw * 0.45;
+    state.dn = state.dn * 0.55 + dnRaw * 0.45;
     if (!live) {
-      state.up *= 0.9;
-      state.dn *= 0.9;
+      state.up *= 0.92;
+      state.dn *= 0.92;
     }
 
     state.histUp.push(state.up);
@@ -535,15 +575,23 @@
     const muted = !!m.muted;
     const injecting = !!m.injecting;
     state.muted = muted;
+    state.injecting = injecting;
 
-    // she speaking → strip chrome text
-    const speaking = live && state.dn > 0.1 && !muted;
+    const wantSpeak = live && state.dn > 0.14 && !muted;
+    const speaking = speakingHysteresis(wantSpeak);
     state.speaking = speaking;
-    document.body.classList.toggle("speaking", speaking);
+    if (document.body.classList.contains("speaking") !== speaking) {
+      document.body.classList.toggle("speaking", speaking);
+    }
 
-    el.status.textContent = live ? "live" : status === "stopped" ? "ended" : "idle";
-    el.status.className =
-      "chip " + (live ? "chip-live" : status === "stopped" ? "chip-ended" : "chip-idle");
+    if (state.lastStatus !== status) {
+      state.lastStatus = status;
+      setText(el.status, live ? "live" : status === "stopped" ? "ended" : "idle");
+      setClass(
+        el.status,
+        "chip " + (live ? "chip-live" : status === "stopped" ? "chip-ended" : "chip-idle")
+      );
+    }
 
     if (speaking) {
       setOrbLabel("");
@@ -561,35 +609,43 @@
       setOrbLabel("waiting");
     }
 
-    el.btnMute.textContent = muted ? "Unmute" : "Mute";
-    el.upPct.textContent = Math.round(state.up * 100) + "%";
-    el.dnPct.textContent = Math.round(state.dn * 100) + "%";
+    const muteLabel = muted ? "Unmute" : "Mute";
+    if (state.lastMuteLabel !== muteLabel) {
+      state.lastMuteLabel = muteLabel;
+      setText(el.btnMute, muteLabel);
+    }
+    setText(el.upPct, Math.round(state.up * 100) + "%");
+    setText(el.dnPct, Math.round(state.dn * 100) + "%");
 
-    paintSegs(upSegs, state.up, muted ? "warn" : "normal");
-    paintSegs(dnSegs, state.dn, "normal");
-    paintOrb(state.dn, state.up, live, muted, injecting);
-    paintWave();
+    paintSegs(upSegs, state.up, muted ? "warn" : "normal", "lastSegUp");
+    paintSegs(dnSegs, state.dn, "normal", "lastSegDn");
 
-    el.tele.session.textContent = m.session_name || "—";
-    el.tele.profile.textContent = m.profile || "—";
-    el.tele.voice.textContent = m.voice || "—";
-    el.tele.mic.textContent = muted ? "muted" : live ? m.uplink_src || "open" : "—";
-    el.tele.mic.className = "v" + (muted ? " warn" : "");
-    el.tele.channel.textContent = injecting
-      ? "inject"
-      : m.dc_open
-        ? "dc"
-        : live
-          ? "audio"
-          : "—";
-    el.tele.channel.className = "v" + (injecting ? " hot" : "");
-    el.tele.link.textContent = `${m.pc || "—"} / ${m.ice || "—"}`;
+    const tele = {
+      session: m.session_name || "—",
+      profile: m.profile || "—",
+      voice: m.voice || "—",
+      mic: muted ? "muted" : live ? m.uplink_src || "open" : "—",
+      channel: injecting ? "inject" : m.dc_open ? "dc" : live ? "audio" : "—",
+      link: `${m.pc || "—"} / ${m.ice || "—"}`,
+    };
+    for (const k of Object.keys(tele)) {
+      if (state.lastTele[k] !== tele[k]) {
+        state.lastTele[k] = tele[k];
+        setText(el.tele[k], tele[k]);
+      }
+    }
+    setClass(el.tele.mic, "v" + (muted ? " warn" : ""));
+    setClass(el.tele.channel, "v" + (injecting ? " hot" : ""));
 
-    el.hint.textContent = live
+    const hint = live
       ? "space mute · f focus · esc end"
       : status === "stopped"
         ? "ended — surface stays open"
         : "waiting for live · f focus";
+    if (state.lastHint !== hint) {
+      state.lastHint = hint;
+      setText(el.hint, hint);
+    }
   }
 
   async function bridgeCall(name, ...args) {
@@ -655,9 +711,17 @@
   });
 
   window.addEventListener("resize", () => {
-    paintOrb(state.dn, state.up, state.live, state.muted, false);
+    fieldKey = "";
+    paintOrb(state.dn, state.up, state.live, state.muted, state.injecting);
     paintWave();
   });
+
+  // Continuous paint (smooth dial). Meters only update levels.
+  function frame() {
+    paintOrb(state.dn, state.up, state.live, state.muted, state.injecting);
+    paintWave();
+    requestAnimationFrame(frame);
+  }
 
   async function tick() {
     try {
@@ -666,14 +730,22 @@
     } catch (_) {
       applyMeters({ status: "idle" });
     }
-    setTimeout(tick, 40);
+    setTimeout(tick, 50);
+  }
+
+  let loopsStarted = false;
+  function startLoops() {
+    if (loopsStarted) return;
+    loopsStarted = true;
+    tick();
+    requestAnimationFrame(frame);
   }
 
   window.addEventListener("pywebviewready", () => {
     state.bridge = "pywebview";
-    tick();
+    startLoops();
   });
 
-  if (window.pywebview && window.pywebview.api) tick();
-  else setTimeout(tick, 100);
+  if (window.pywebview && window.pywebview.api) startLoops();
+  else setTimeout(startLoops, 100);
 })();

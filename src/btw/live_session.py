@@ -1,19 +1,20 @@
 """Standalone Live session: mint + aiortc + local audio + control IPC.
 
 Context delivery (product):
-  Wingman does not reliably honor Realtime-style datachannel text events
-  (DC often closes; remote stays silent). Session context is delivered by
-  speaking a short brief over the uplink (TTS → InjectableUplinkTrack).
+  Plain-text datachannel entries — not TTS, not Realtime JSON envelopes.
+  Realtime-style session.update/response.create often closes Wingman PC.
 
-  - On start: bootstrap brief from profile + full session context
-  - Mid-call: control cmd push_context / speak_context top-ups the same way
-  - DC session.update pack is still sent best-effort when the channel is open
+  - On DC open: plain-text session brief + context entries
+  - Mid-call top-up: plain-text entry on open DC
+  - Optional audio TTS only if BTW_AUDIO_BOOT / BTW_AUDIO_TOPUP = 1
+  - Optional Realtime JSON only if BTW_DC_REALTIME = 1
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Any, Callable, Optional
@@ -27,7 +28,7 @@ from .audio_io import (
     SpeakerPlayer,
     synthesize_speech_wav,
 )
-from .control import drain_commands, write_live_status, write_meters
+from .control import clear_commands, drain_commands, write_live_status, write_meters
 from .http_client import ChatGPTClient
 from .paths import data_dir
 from .profiles import SessionProfile, load_profile
@@ -35,6 +36,8 @@ from .session_json import (
     build_voice_session_payload,
     context_push_events,
     instruction_events,
+    plain_boot_entries,
+    plain_topup_entry,
 )
 
 log = logging.getLogger("btw.live")
@@ -204,6 +207,10 @@ class LiveSession:
         except Exception:
             pass
 
+    @staticmethod
+    def _env_flag(name: str) -> bool:
+        return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
     def _send_events(self, channel, events: list[dict[str, Any]], tag: str) -> int:
         n = 0
         for ev in events:
@@ -218,22 +225,51 @@ class LiveSession:
                 _log(f"dc_send err: {e}")
         return n
 
+    def _send_plain_texts(self, channel, texts: list[str], tag: str) -> int:
+        """Product path: raw UTF-8 strings on the datachannel (not Realtime JSON)."""
+        n = 0
+        for i, text in enumerate(texts):
+            t = (text or "").strip()
+            if not t:
+                continue
+            try:
+                channel.send(t)
+                self.stats.setdefault("dc_events", []).append("plain_text")
+                self._append_inbox(
+                    "out", t, {"tag": tag, "type": "plain_text", "i": i}
+                )
+                _log(f"dc_plain[{tag}] i={i} chars={len(t)}")
+                n += 1
+            except Exception as e:
+                _log(f"dc_plain err: {e}")
+        return n
+
     def _boot_inject_sync(self, channel) -> None:
-        """Best-effort DC pack — often ignored; audio inject is source of truth."""
+        """Inject session brief + context as plain text on DC open."""
         try:
             if getattr(channel, "readyState", None) != "open":
                 return
-            n = self._send_events(
-                channel, instruction_events(self.instructions), "boot"
-            )
+            if self._env_flag("BTW_DC_REALTIME"):
+                n = self._send_events(
+                    channel, instruction_events(self.instructions), "boot"
+                )
+                self.stats["boot_events"] = n
+                self.stats["dc_injection_sent"] = n > 0
+                _log(f"boot_dc realtime sent={n} ready={getattr(channel, 'readyState', '?')}")
+                return
+
+            entries = plain_boot_entries(self.instructions, self.context)
+            n = self._send_plain_texts(channel, entries, "boot")
             self.stats["boot_events"] = n
             self.stats["dc_injection_sent"] = n > 0
-            _log(f"boot_dc sent={n} ready={getattr(channel, 'readyState', '?')}")
+            _log(
+                f"boot_dc plain sent={n} entries ready={getattr(channel, 'readyState', '?')}"
+            )
         except Exception as e:
             _log(f"boot_inject err: {e}")
 
     def speak_text(self, text: str, *, tag: str = "speak") -> bool:
-        """Queue TTS onto the uplink so the voice agent hears it."""
+        """Queue TTS onto the uplink (opt-in fallback only)."""
         t = (text or "").strip()
         if not t:
             return False
@@ -255,32 +291,50 @@ class LiveSession:
             return False
 
     def speak_bootstrap(self) -> bool:
+        """Audio bootstrap — off unless BTW_AUDIO_BOOT=1 (plain text is primary)."""
+        if not self._env_flag("BTW_AUDIO_BOOT"):
+            _log("audio bootstrap skipped (plain-text DC is primary; BTW_AUDIO_BOOT=1 to force)")
+            self.stats["bootstrap"] = False
+            return False
         return self.speak_text(
             spoken_bootstrap(self.instructions, self.context), tag="bootstrap"
         )
 
     def speak_context_topup(self, delta: str) -> bool:
+        if not self._env_flag("BTW_AUDIO_TOPUP"):
+            return False
         return self.speak_text(spoken_topup(delta), tag="topup")
 
     def reinject_instructions(self, instructions: str | None = None) -> bool:
         if instructions is not None:
             self.instructions = instructions
-        ok_audio = self.speak_text(
-            spoken_bootstrap(self.instructions, self.context), tag="reinject"
-        )
         ch = self._dc
         ok_dc = False
         if ch and getattr(ch, "readyState", None) == "open":
-            self._send_events(ch, instruction_events(self.instructions), "reinject")
+            if self._env_flag("BTW_DC_REALTIME"):
+                self._send_events(
+                    ch, instruction_events(self.instructions), "reinject"
+                )
+            else:
+                self._send_plain_texts(
+                    ch,
+                    plain_boot_entries(self.instructions, self.context),
+                    "reinject",
+                )
             ok_dc = True
         else:
-            _log("reinject: no open datachannel (audio path used)")
+            _log("reinject: no open datachannel")
+        ok_audio = False
+        if self._env_flag("BTW_AUDIO_BOOT"):
+            ok_audio = self.speak_text(
+                spoken_bootstrap(self.instructions, self.context), tag="reinject"
+            )
         return ok_audio or ok_dc
 
     def push_context_live(
         self, context_delta: str, *, full_context: str | None = None
     ) -> bool:
-        """Top-up context mid-call: store + speak delta (+ DC best-effort)."""
+        """Top-up context mid-call: store + plain-text DC entry (+ optional TTS)."""
         delta = (context_delta or "").strip()
         if full_context is not None:
             self.context = full_context
@@ -298,14 +352,19 @@ class LiveSession:
         except Exception as e:
             _log(f"push_context file write: {e}")
 
-        ok_audio = self.speak_context_topup(delta) if delta else False
-        ch = self._dc
         ok_dc = False
+        ch = self._dc
         if ch and getattr(ch, "readyState", None) == "open" and delta:
-            self._send_events(ch, context_push_events(delta), "context")
+            if self._env_flag("BTW_DC_REALTIME"):
+                self._send_events(ch, context_push_events(delta), "context")
+            else:
+                entry = plain_topup_entry(delta)
+                self._send_plain_texts(ch, [entry] if entry else [], "context")
             ok_dc = True
         elif delta:
-            _log("push_context: DC closed — audio top-up only")
+            _log("push_context: DC closed — text not delivered")
+
+        ok_audio = self.speak_context_topup(delta) if delta else False
         self._publish_status()
         return ok_audio or ok_dc
 
@@ -321,6 +380,9 @@ class LiveSession:
                 pass
 
     async def start(self) -> dict[str, Any]:
+        # Drop stop/mute orphans from a prior kill or ESC key-repeat so this
+        # session does not die on the first control tick.
+        clear_commands()
         _log(f"auth backend={self.client.backend} …")
         token = self.client.fetch_access_token()
         _log(f"accessToken ok len={len(token)}")
@@ -490,6 +552,8 @@ class LiveSession:
                     _log("control: stop")
                     self._stop_requested = True
                     self._closed.set()
+                    # Ignore rest of batch (ESC key-repeat / stacked stops).
+                    break
                 elif cmd == "reinject":
                     if rec.get("instructions"):
                         self.instructions = rec["instructions"]

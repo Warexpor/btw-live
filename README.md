@@ -68,7 +68,7 @@ python -m btw.runtime stop
 ## Limits
 
 - Unofficial; endpoints and behavior can change without notice.
-- Session context is spoken as a short audio brief; datachannel text inject is best-effort.
+- Session context is plain-text datachannel entries on start/top-up; optional TTS via `BTW_AUDIO_BOOT` / `BTW_AUDIO_TOPUP`.
 - Not full ChatGPT UI feature parity (widgets, etc.).
 - Cookies = full account access — treat as secrets.
 

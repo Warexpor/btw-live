@@ -48,17 +48,57 @@ def build_voice_session_payload(
     }
 
 
-def instruction_events(instructions: str) -> list[dict[str, Any]]:
-    """Datachannel events to inject system prompt + context (btw-style pack).
+# Soft cap per plain-text DC message (Wingman is not Realtime; keep entries small)
+PLAIN_ENTRY_MAX = 4000
 
-    Order matters: set session instructions, then seed a system-style item,
-    then a clear bootstrap user item so the model has ground truth even if
-    session.instructions is ignored by wingman.
+
+def _clip_plain(text: str, limit: int = PLAIN_ENTRY_MAX) -> str:
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[:limit] + "\n…[truncated]"
+
+
+def plain_boot_entries(instructions: str, context: str = "") -> list[str]:
+    """Exactly one plain-text DC inject for call start (product path).
+
+    Single compact: header + assembled instructions (profile + context pack).
+    Mid-call top-ups stay separate via plain_topup_entry. No JSON envelope.
+    """
+    ins = (instructions or "").strip()
+    ctx = (context or "").strip()
+    header = (
+        "[BTW-VC SESSION BRIEF — binding for this voice call]\n"
+        "You are the /btw-vc side channel for a Grok Build coding session. "
+        "Grok codes; you only advise. You cannot edit files.\n"
+    )
+    if ins:
+        body = header + "\n" + ins
+    elif ctx:
+        body = header + "\n## Current Grok session context\n" + ctx
+    else:
+        body = header.strip()
+    return [_clip_plain(body)]
+
+
+def plain_topup_entry(delta: str) -> str:
+    """Single plain-text DC entry for mid-call context top-up."""
+    d = (delta or "").strip()
+    if not d:
+        return ""
+    return _clip_plain(
+        "[BTW-VC CONTEXT UPDATE — treat as current Grok session facts]\n" + d
+    )
+
+
+def instruction_events(instructions: str) -> list[dict[str, Any]]:
+    """Legacy Realtime-style DC JSON (opt-in only — often kills Wingman PC).
+
+    Prefer plain_boot_entries(). Enable with BTW_DC_REALTIME=1.
     """
     text = (instructions or "").strip()
     if not text:
         return []
-    # Keep under typical DC message size comfort
     if len(text) > 12000:
         text = text[:12000] + "\n…[truncated]"
 
@@ -106,7 +146,7 @@ def instruction_events(instructions: str) -> list[dict[str, Any]]:
 
 
 def context_push_events(context: str) -> list[dict[str, Any]]:
-    """Mid-call context update (like feeding /btw more context)."""
+    """Legacy Realtime-style mid-call JSON (opt-in BTW_DC_REALTIME=1)."""
     ctx = (context or "").strip()
     if not ctx:
         return []

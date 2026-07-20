@@ -74,6 +74,16 @@ def push_command(cmd: str, **kwargs: Any) -> dict[str, Any]:
     return {"ok": True, "queued": rec}
 
 
+def clear_commands() -> None:
+    """Drop any pending control IPC (orphans from kill / key-repeat / prior session)."""
+    p = control_path()
+    try:
+        data_dir().mkdir(parents=True, exist_ok=True)
+        p.write_text("", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def drain_commands() -> list[dict[str, Any]]:
     p = control_path()
     if not p.is_file():

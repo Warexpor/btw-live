@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.29 — 2026-07-20
+
+### Changed
+
+- Boot context inject is **always a single plain-text DC message** (session compact). Top-ups remain separate messages.
+
+## 0.5.28 — 2026-07-20
+
+### Changed
+
+- **Context inject is plain text on the datachannel**, not TTS. On DC open: session brief + context blocks as raw UTF-8 entries. Mid-call top-ups are plain-text entries too.
+- Audio TTS bootstrap/top-up is opt-in only (`BTW_AUDIO_BOOT=1` / `BTW_AUDIO_TOPUP=1`).
+- Legacy Realtime JSON (`session.update` / `response.create`) opt-in only (`BTW_DC_REALTIME=1`) — that path was closing Wingman.
+
+## 0.5.27 — 2026-07-20
+
+### Fixed
+
+- Live dying ~seconds after connect: default **no DC boot inject**. Realtime-style `session.update` / `response.create` on the Wingman datachannel closed DC + PC; product path is spoken bootstrap only (`BTW_DC_BOOT=1` to force old behavior).
+- Viz surface flash: no layout reflow on `speaking` (removed gap change); speaking hysteresis; canvas resize ignores 1–2px jitter; DOM/seg updates only when values change; continuous rAF paint separate from meter poll.
+
+## 0.5.26 — 2026-07-20
+
+### Fixed
+
+- Control IPC stop spam: clear `control.jsonl` on Live start and after runtime kill; first `stop` in a drain batch ends the loop so ESC key-repeat / orphan queues no longer log multi-stop and mute the dying session.
+
 ## 0.5.25 — 2026-07-20
 
 ### Changed

@@ -270,9 +270,11 @@ def stop_runtime() -> dict[str, Any]:
             pass
     mark_stopped(st)
     # Kill path skips LiveSession.stop(); clear ghost live_status.json
+    # and any undrained stop/mute lines so the next start is clean.
     try:
-        from .control import mark_live_status_stopped
+        from .control import clear_commands, mark_live_status_stopped
 
+        clear_commands()
         mark_live_status_stopped(
             session_name=st.session_name or "default",
             profile=st.profile or "default",

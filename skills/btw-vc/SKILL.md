@@ -12,8 +12,8 @@ Separate Live voice channel. Not the coding agent.
 1. **Profile** = system rules (`sessions/*.toml`: default / debugger / architect).
 2. **Session** = named pack: profile + context text.
 3. **Context** = short Grok facts (goal, files, errors). Stored on the active session.
-4. On **start**, short brief is **spoken** over the uplink (TTS). DC `session.update` is best-effort only.
-5. Mid-call: `/btw-topup` → `btw_push_context` appends pack + speaks delta (audio first).
+4. On **start**, context is injected as **plain-text datachannel entries** (not TTS). Audio TTS only if `BTW_AUDIO_BOOT=1`.
+5. Mid-call: `/btw-topup` → `btw_push_context` appends pack + plain-text DC entry (`BTW_AUDIO_TOPUP=1` for TTS too).
 
 ## User phrases → tools
 

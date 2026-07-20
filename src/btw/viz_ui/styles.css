@@ -271,7 +271,8 @@ body.mode-focus .focus-exit:focus {
 .orb-label.hot { color: var(--white); }
 .orb-label.warn { color: var(--sunset); }
 
-/* less text while she speaks */
+/* less text while she speaks — opacity only (no layout/gap changes; those
+   reflow the canvas and flash the whole surface every speaking edge). */
 body.speaking .orb-label {
   opacity: 0;
 }
@@ -279,9 +280,6 @@ body.speaking .meta-detail,
 body.speaking .hint {
   opacity: 0;
   pointer-events: none;
-}
-body.speaking .meta-strip {
-  gap: 18px;
 }
 body.speaking .chip {
   opacity: 0.55;
