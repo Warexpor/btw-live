@@ -18,7 +18,8 @@ See [docs/SAFE_DOCS.md](docs/SAFE_DOCS.md) for how we write docs going forward.
 | Sessions | Named packs: profile + context + optional voice |
 | Mute | Mic mute without ending the call |
 | Voice | Speak voice id at mint (e.g. maple) |
-| Context | Profile system + Grok snip → inject on connect |
+| Context | Profile + short pack; spoken uplink brief (DC text best-effort) |
+| `/btw-topup` | Mid-call curated fact snip (append + speak delta) |
 
 Not a second coding agent. Side channel only.
 
@@ -47,6 +48,7 @@ Or `/btw-cookies` (never commit that file).
 | `/btw-vc` | start |
 | `/btw-stop` | end call |
 | `/btw-mute` / `/btw-unmute` | mic |
+| `/btw-topup` | mid-call context snip |
 | `/btw-sessions` / `session-new` / `use` / `delete` | packs |
 | `/btw-voice` | list/set speak voice |
 | `/btw-cookies` | import or clear local cookies |
@@ -64,7 +66,7 @@ python -m btw.runtime stop
 ## Limits
 
 - Unofficial; endpoints and behavior can change without notice.
-- Instruction injection over the datachannel is best-effort.
+- Session context is spoken as a short audio brief; datachannel text inject is best-effort.
 - Not full ChatGPT UI feature parity (widgets, etc.).
 - Cookies = full account access — treat as secrets.
 

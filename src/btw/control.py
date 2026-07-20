@@ -23,6 +23,11 @@ def write_live_status(payload: dict[str, Any]) -> None:
     status_live_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def mark_live_status_stopped(**extra: Any) -> None:
+    """Clear ghost 'live' status after kill/stop (pid gone)."""
+    write_live_status({"status": "stopped", **extra})
+
+
 def push_command(cmd: str, **kwargs: Any) -> dict[str, Any]:
     data_dir().mkdir(parents=True, exist_ok=True)
     rec = {"cmd": cmd, "ts": time.time(), **kwargs}

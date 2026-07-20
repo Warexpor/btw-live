@@ -13,6 +13,7 @@ description: btw hub for Grok Build. Voice Live is /btw-vc — use that skill fo
 | `/btw-stop` | btw-stop — end Live |
 | `/btw-mute` | btw-mute — mic mute only |
 | `/btw-unmute` | btw-unmute — mic on |
+| `/btw-topup` | mid-call curated context snip |
 | `/btw-sessions` | list packs |
 | `/btw-session-new` | create pack |
 | `/btw-session-use` | switch pack |

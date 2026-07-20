@@ -139,6 +139,17 @@ def stop_runtime() -> dict[str, Any]:
         except Exception:
             pass
     mark_stopped(st)
+    # Kill path skips LiveSession.stop(); clear ghost live_status.json
+    try:
+        from .control import mark_live_status_stopped
+
+        mark_live_status_stopped(
+            session_name=st.session_name or "default",
+            profile=st.profile or "default",
+            killed=killed,
+        )
+    except Exception as e:
+        _log(f"live_status clear: {e}")
     return {"ok": True, "killed": killed, "state": load_state().to_dict()}
 
 

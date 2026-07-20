@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.12 — 2026-07-20
+
+### Fixed
+
+- `/btw-stop` kill path clears `live_status.json` (no ghost `status: live` after force kill).
+- `btw_status` marks leftover live status as stopped/`stale` when runtime pid is dead.
+- Plugin manifest version was stuck at 0.5.6; aligned to package version.
+
+### Changed
+
+- README + hub skill list `/btw-topup`; context line matches audio brief delivery.
+
 ## 0.5.11 — 2026-07-20
 
 ### Fixed

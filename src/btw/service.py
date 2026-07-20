@@ -43,6 +43,11 @@ def status() -> dict[str, Any]:
         except Exception:
             live = None
 
+    # Dead runtime + leftover live_status.json must not look "live"
+    running = _pid_running()
+    if live and not running and str(live.get("status") or "").lower() == "live":
+        live = {**live, "status": "stopped", "stale": True}
+
     eff_voice = ss.effective_voice(active)
     return {
         "version": __version__,
@@ -61,7 +66,7 @@ def status() -> dict[str, Any]:
         "voices": list_voices(),
         "cookies_ok": cookie_ok,
         "cookies_error": cookie_err,
-        "runtime_pid_running": _pid_running(),
+        "runtime_pid_running": running,
         "muted": bool(st.muted or (live or {}).get("muted")),
         "live": live,
         "data_dir": str(data_dir()),
