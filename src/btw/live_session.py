@@ -794,6 +794,7 @@ class LiveSession:
                                 _log(
                                     f"speaker: frames={frames_n} "
                                     f"u={st.get('underruns', 0)} "
+                                    f"su={st.get('silence_underruns', 0)} "
                                     f"pu={st.get('partial_underruns', 0)} "
                                     f"drop={st.get('ring_drops', 0)} "
                                     f"sd_uf={st.get('sd_underflows', 0)} "

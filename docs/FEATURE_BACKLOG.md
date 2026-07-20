@@ -34,8 +34,9 @@ Priority is a suggestion only — reorder when building.
 - [x] `/btw-proxy` + MCP `btw_proxy` (on/off/auto/toggle)
 - [x] Media remains WebRTC direct (TUN out of scope here)
 
-### [x] Speaker path harden (0.5.47–0.5.49)
-- [x] Partial underrun fade-hold, join declick, low artificial lag
+### [x] Speaker path harden (0.5.47–0.5.51)
+- [x] Partial underrun fade-hold; no hard-zero shortfalls
+- [x] Mid-speech stutter fix (0.5.51): real jitter buffer (~120 ms preroll / ~100 ms target), join thresh not re-blending every packet
 
 ---
 

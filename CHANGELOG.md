@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.51 — 2026-07-20
+
+### Fixed
+
+- **Mid-output stutters (root cause from live logs):** speaker ring chronically empty under 40 ms cushion (`u` climbed every 5 s, `ring` stuck at 1–2 frames, `drop=0`). Restored real jitter buffer (~120 ms preroll, ~100 ms target, ~320 ms cap). **Post-gain packet join threshold was 0.08** — re-blended almost every WebRTC packet → warble; raised to 0.28 and only join on real jumps/lag-drops. Silence underruns no longer counted as speech underruns; clean zeros when quiet.
+
+### Changed
+
+- README limits + FEATURE_BACKLOG note the 0.5.51 playout buffer (docs catch-up with installed fix).
+
 ## 0.5.50 — 2026-07-20
 
 ### Added

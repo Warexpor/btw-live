@@ -27,19 +27,24 @@ RING_SECONDS = 3
 # Hard safety: never let peaks hit full scale (ear protection)
 SPEAKER_GAIN = 0.28
 SPEAKER_PEAK_LIMIT = 0.40
-# Minimal playout cushion (user: no helpful artificial lag)
-SPEAKER_PREROLL = int(SAMPLE_RATE * 0.04)  # 40 ms (~2 frames)
+# Playout jitter buffer. Logs showed chronic full underruns with 40 ms cushion
+# (u≈8% of pulls, ring stuck at 1–2 frames, drop=0). WebRTC arrives unevenly;
+# starving the PortAudio callback → audible stutters mid-speech.
+SPEAKER_PREROLL = int(SAMPLE_RATE * 0.12)  # 120 ms before first play
 # Crossfade only on real discontinuities (inject↔mic), not every speech frame
 DECLICK_SAMPLES = 64
 # Only treat near-digital jumps as decode glitches (speech legitimately jumps more)
 CLICK_JUMP = 0.85
-# Post-gain speaker joins (levels ~0.4 max): lower bar than full-scale uplink
-SPEAKER_JOIN_JUMP = 0.08
+# Post-gain packet joins: must stay HIGH. At 0.08 almost every WebRTC packet
+# boundary re-blended → warble/stutter on continuous speech (log + theory).
+SPEAKER_JOIN_JUMP = 0.28
 SPEAKER_JOIN_SAMPLES = 48
-# Keep ring tight — nibble backlog hard
-SPEAKER_TARGET = int(SAMPLE_RATE * 0.04)  # ~40 ms
-SPEAKER_HIGH = int(SAMPLE_RATE * 0.08)  # trim above ~80 ms
-SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.15)  # hard cap ~150 ms
+# Steady playout depth + room for network jitter without multi-second lag
+SPEAKER_TARGET = int(SAMPLE_RATE * 0.10)  # ~100 ms
+SPEAKER_HIGH = int(SAMPLE_RATE * 0.18)  # nibble above ~180 ms
+SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.32)  # hard cap ~320 ms
+# Treat "recent remote audio" for underrun diagnostics / silence vs mid-speech
+SPEAKER_ACTIVE_S = 0.25
 
 
 class _FloatRing:
@@ -471,7 +476,8 @@ class SpeakerPlayer:
         self._starved = False
         self._need_join = False  # set after lag drop — next play block blends
         # diagnostics (surfaced in stats())
-        self.underruns = 0
+        self.underruns = 0  # mid-speech only (recent remote audio)
+        self.silence_underruns = 0  # expected when she pauses
         self.partial_underruns = 0
         self.ring_drops = 0
         self.sd_underflows = 0
@@ -482,14 +488,21 @@ class SpeakerPlayer:
             self.last_peak = self._env.update(0.0)
         return float(self.last_peak)
 
+    def _audio_active(self) -> bool:
+        if not self._last_audio_ts:
+            return False
+        return (time.monotonic() - self._last_audio_ts) < SPEAKER_ACTIVE_S
+
     def stats(self) -> dict:
         return {
             "frames_in": self._frames_in,
             "ring": self._ring.size,
             "underruns": self.underruns,
+            "silence_underruns": self.silence_underruns,
             "partial_underruns": self.partial_underruns,
             "ring_drops": self.ring_drops,
             "sd_underflows": self.sd_underflows,
+            "active": self._audio_active(),
         }
 
     def start(self) -> None:
@@ -533,11 +546,19 @@ class SpeakerPlayer:
                 player._ring, frames, player._last_played
             )
             if starved:
-                if have <= 0:
-                    player.underruns += 1
+                # Silence gaps are normal (she pauses). Mid-speech empty ring = stutter.
+                if player._audio_active():
+                    if have <= 0:
+                        player.underruns += 1
+                    else:
+                        player.partial_underruns += 1
                 else:
-                    player.partial_underruns += 1
-            # After underrun or lag-drop, blend into the next real audio block
+                    player.silence_underruns += 1
+                    # Don't invent hold-tone during quiet; zeros are clean silence
+                    if abs(float(player._last_played)) < 1e-3:
+                        mono = np.zeros(frames, dtype=np.float32)
+                        last = 0.0
+            # After mid-speech underrun or lag-drop only — not every packet
             if (was_starved or need_join) and not starved and mono.size:
                 mono = _declick_join(
                     player._last_played,
@@ -566,7 +587,8 @@ class SpeakerPlayer:
             dtype="float32",
             blocksize=FRAME_SAMPLES,
             device=self._device,
-            latency="low",
+            # Slightly above "low": fewer host buffer hiccups; still ~1–2 frames.
+            latency=0.06,
             callback=callback,
         )
         self._stream.start()
@@ -595,14 +617,16 @@ class SpeakerPlayer:
             # Rare digital spikes only; do not re-process every speech frame
             mono = _soften_intra_clicks(mono)
             limited = _limit(mono, gain=self._gain, peak=SPEAKER_PEAK_LIMIT)
-            # Packet boundary join (post-gain). Mild speech steps stay under bar.
+            # Join only real discontinuities (lag drop / rare decode jump).
+            # Continuous speech packet edges must NOT re-blend every frame.
             with self._write_lock:
-                limited = _declick_join(
-                    self._last_written,
-                    limited,
-                    n=SPEAKER_JOIN_SAMPLES,
-                    jump_thresh=SPEAKER_JOIN_JUMP,
-                )
+                if self._need_join or abs(float(limited[0]) - self._last_written) > SPEAKER_JOIN_JUMP:
+                    limited = _declick_join(
+                        self._last_written,
+                        limited,
+                        n=SPEAKER_JOIN_SAMPLES,
+                        jump_thresh=SPEAKER_JOIN_JUMP,
+                    )
                 if limited.size:
                     self._last_written = float(limited[-1])
             heard = _frame_level(limited / max(SPEAKER_PEAK_LIMIT, 1e-6))
@@ -614,7 +638,7 @@ class SpeakerPlayer:
             if size > SPEAKER_RING_MAX:
                 dropped = self._ring.drop_to(SPEAKER_TARGET)
             elif size > SPEAKER_HIGH:
-                # Nibble toward target (one frame of lag per write) — less lag, soft joins
+                # Nibble toward target (one frame per write) — soft catch-up
                 keep = max(SPEAKER_TARGET, size - FRAME_SAMPLES)
                 dropped = self._ring.drop_to(keep)
             else:

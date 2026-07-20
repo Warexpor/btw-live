@@ -125,10 +125,10 @@ def test_speaker_pull_empty_fades_hold():
     assert abs(float(last)) < 0.25
 
 
-def test_speaker_join_thresh_catches_post_gain_edges():
-    # post-gain levels are small; default 0.45 bar would miss these
-    mono = np.full(960, 0.2, dtype=np.float32)
+def test_speaker_join_thresh_catches_real_edges_not_speech():
+    # real discontinuity (e.g. lag drop) still blends; mild speech steps left alone
+    mono = np.full(960, 0.35, dtype=np.float32)
     out = _declick_join(0.0, mono, n=32, jump_thresh=SPEAKER_JOIN_JUMP)
     assert abs(float(out[0])) < 0.05
-    mild = np.linspace(0.05, 0.07, 960, dtype=np.float32)
+    mild = np.linspace(0.05, 0.12, 960, dtype=np.float32)  # step 0.07 << 0.28
     assert np.allclose(_declick_join(0.05, mild, jump_thresh=SPEAKER_JOIN_JUMP), mild)

@@ -88,7 +88,8 @@ ChatGPT **token / mint / conversation** HTTP can go through a SOCKS or HTTP prox
 - Product context inject is **uplink TTS** on start/top-up (Wingman hears audio). Disable with `BTW_NO_AUDIO_INJECT=1`. Plain DC is best-effort only.
 - Agent must **not** call `btw_push_context` unless the user explicitly top-ups.
 - Conversation resume bind is best-effort (hydrate proven; mint bind fields may fall back unbound on 4xx).
-- HTTP proxy does **not** fix mid-speech audio jitter; that path is WebRTC direct unless TUN.
+- HTTP proxy does **not** fix mid-speech audio; media is WebRTC direct unless OS TUN.
+- Downlink uses a ~100–120 ms playout jitter buffer (cap ~320 ms). Too-thin buffers caused mid-speech underrun stutters; see CHANGELOG 0.5.51.
 - Not full ChatGPT UI feature parity (widgets, etc.).
 - Cookies = full account access — treat as secrets.
 
