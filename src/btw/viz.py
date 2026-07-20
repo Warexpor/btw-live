@@ -60,22 +60,46 @@ class VizApi:
 
 
 def _demo_loop() -> None:
-    """Write fake meters so the shell animates without Live."""
+    """Write fake meters so the shell animates without Live.
+
+    Default pattern: AI speaking only (downlink bursts). Mic stays quiet so
+    the orb can be judged as AI-driven. Set BTW_VIZ_DEMO_BOTH=1 for old dual.
+    """
     from .control import write_meters
 
+    both = os.environ.get("BTW_VIZ_DEMO_BOTH", "").strip() in ("1", "true", "yes")
     t0 = time.time()
     while True:
         t = time.time() - t0
+        # speech-like envelope: talk ~2.2s, pause ~0.9s
+        cycle = t % 3.1
+        talking = cycle < 2.2
+        if talking:
+            # formant-ish peaks above AI_THRESH (~0.12 level → need raw peaks higher)
+            dn = 0.22 + 0.55 * abs(math.sin(t * 9.5)) * (0.55 + 0.45 * abs(math.sin(t * 2.1)))
+            dn *= 0.75 + 0.25 * abs(math.sin(t * 0.7))
+        else:
+            dn = 0.02 + 0.03 * abs(math.sin(t * 3.0))  # below orb threshold
+
+        if both:
+            muted = int(t) % 17 > 14
+            up = 0.15 + 0.45 * abs(math.sin(t * 2.3))
+            injecting = int(t) % 23 > 20
+        else:
+            muted = False
+            up = 0.0  # mic silent — orb must not react
+            injecting = False
+
         write_meters(
             {
                 "status": "live",
                 "session_name": "demo",
                 "profile": "default",
                 "voice": "maple",
-                "muted": int(t) % 17 > 14,
-                "injecting": int(t) % 23 > 20,
-                "uplink_peak": 0.15 + 0.45 * abs(math.sin(t * 2.3)),
-                "downlink_peak": 0.1 + 0.65 * abs(math.sin(t * 1.4 + 0.6)),
+                "muted": muted,
+                "injecting": injecting,
+                "uplink_peak": up,
+                "downlink_peak": dn,
                 "pc": "connected",
                 "ice": "connected",
                 "dc_open": True,

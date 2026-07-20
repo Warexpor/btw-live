@@ -33,6 +33,24 @@ from .version import __version__
 from .voices import list_voices
 
 
+def _active_bind_public(active: Any) -> dict[str, Any]:
+    cid = (getattr(active, "conversation_id", None) or "").strip()
+    return {
+        "id": active.id,
+        "name": active.name,
+        "profile": active.profile,
+        "voice": active.voice or None,
+        "voice_effective": ss.effective_voice(active),
+        "context_chars": len(active.context or ""),
+        "context_preview": (active.context or "")[:120].replace("\n", " "),
+        "conversation_id": cid or None,
+        "conversation_short": (cid[:8] + "…") if len(cid) > 10 else (cid or None),
+        "conversation_title": (active.conversation_title or None) or None,
+        "resume": bool(cid),
+        "last_voice_session_id": active.last_voice_session_id or None,
+    }
+
+
 def status() -> dict[str, Any]:
     st = load_state()
     active = ss.get_active()
@@ -56,19 +74,10 @@ def status() -> dict[str, Any]:
     if live and not running and str(live.get("status") or "").lower() == "live":
         live = {**live, "status": "stopped", "stale": True}
 
-    eff_voice = ss.effective_voice(active)
     return {
         "version": __version__,
         "state": st.to_dict(),
-        "active_session": {
-            "id": active.id,
-            "name": active.name,
-            "profile": active.profile,
-            "voice": active.voice or None,
-            "voice_effective": eff_voice,
-            "context_chars": len(active.context or ""),
-            "context_preview": (active.context or "")[:120].replace("\n", " "),
-        },
+        "active_session": _active_bind_public(active),
         "sessions": ss.list_sessions(),
         "profiles": list_profiles(),
         "voices": list_voices(),
@@ -145,6 +154,149 @@ def session_delete(id_or_name: str) -> dict[str, Any]:
     return ss.delete_session(id_or_name)
 
 
+def session_bind(conversation_id: str) -> dict[str, Any]:
+    """Bind active named session to a ChatGPT conversation_id (URL or uuid)."""
+    from .conversation import conversation_summary, normalize_conversation_id
+    from .http_client import ChatGPTClient
+
+    cid = normalize_conversation_id(conversation_id)
+    title = ""
+    parent = ""
+    preview = ""
+    turn_count = 0
+    fetch_err = None
+    try:
+        client = ChatGPTClient()
+        conv = client.get_conversation(cid)
+        summary = conversation_summary(conv)
+        title = str(summary.get("title") or "")
+        parent = str(summary.get("parent_message_id") or "")
+        preview = str(summary.get("preview") or "")
+        turn_count = int(summary.get("turn_count") or 0)
+        cid = str(summary.get("conversation_id") or cid)
+    except Exception as e:
+        fetch_err = str(e)
+
+    s = ss.bind_active_conversation(
+        cid,
+        title=title,
+        parent_message_id=parent,
+    )
+    return {
+        "ok": True,
+        "session": s["name"],
+        "conversation_id": cid,
+        "conversation_title": title or None,
+        "turn_count": turn_count,
+        "preview": preview[:200] if preview else None,
+        "fetch_error": fetch_err,
+        "hint": "Next /btw-vc mints with this conversation_id and hydrates a resume brief.",
+    }
+
+
+def session_fresh() -> dict[str, Any]:
+    """Clear ChatGPT conversation bind on active session (keep local pack)."""
+    s = ss.clear_active_conversation()
+    return {
+        "ok": True,
+        "session": s["name"],
+        "resume": False,
+        "hint": "Next /btw-vc starts an unbound Live mint (new ChatGPT thread if any).",
+    }
+
+
+def session_sync() -> dict[str, Any]:
+    """Refresh title/preview from bound conversation (no Live start)."""
+    from .conversation import conversation_summary, format_resume_snip, extract_voice_turns
+    from .http_client import ChatGPTClient
+
+    active = ss.get_active()
+    cid = (active.conversation_id or "").strip()
+    if not cid:
+        return {
+            "ok": False,
+            "error": "no conversation_id bound — use btw_session_bind first",
+            "session": active.name,
+        }
+    client = ChatGPTClient()
+    conv = client.get_conversation(cid)
+    summary = conversation_summary(conv)
+    turns = extract_voice_turns(conv)
+    ss.update_active(
+        conversation_title=str(summary.get("title") or ""),
+        parent_message_id=str(summary.get("parent_message_id") or ""),
+    )
+    # Cache resume snip for next start
+    snip = format_resume_snip(turns)
+    (data_dir() / "resume_snip.txt").write_text(snip, encoding="utf-8")
+    return {
+        "ok": True,
+        "session": active.name,
+        "conversation_id": cid,
+        "conversation_title": summary.get("title"),
+        "turn_count": summary.get("turn_count"),
+        "preview": (summary.get("preview") or "")[:240],
+        "resume_chars": len(snip),
+    }
+
+
+def hydrate_resume_for_active() -> dict[str, Any]:
+    """Fetch conversation dump for active bind → resume snip on disk.
+
+    Returns dict with conversation_id, resume_snip, title, error (optional).
+    """
+    from .conversation import (
+        conversation_summary,
+        extract_voice_turns,
+        format_resume_snip,
+    )
+    from .http_client import ChatGPTClient
+
+    active = ss.get_active()
+    cid = (active.conversation_id or "").strip()
+    out: dict[str, Any] = {
+        "conversation_id": cid or None,
+        "resume_snip": "",
+        "title": active.conversation_title or "",
+        "turn_count": 0,
+        "error": None,
+    }
+    if not cid:
+        (data_dir() / "resume_snip.txt").write_text("", encoding="utf-8")
+        return out
+    try:
+        client = ChatGPTClient()
+        conv = client.get_conversation(cid)
+        summary = conversation_summary(conv)
+        turns = extract_voice_turns(conv)
+        snip = format_resume_snip(turns)
+        title = str(summary.get("title") or "")
+        parent = str(summary.get("parent_message_id") or "")
+        ss.update_active(
+            conversation_title=title,
+            parent_message_id=parent,
+        )
+        (data_dir() / "resume_snip.txt").write_text(snip, encoding="utf-8")
+        out.update(
+            {
+                "resume_snip": snip,
+                "title": title,
+                "turn_count": len(turns),
+                "parent_message_id": parent,
+            }
+        )
+    except Exception as e:
+        out["error"] = str(e)
+        # keep any prior cache
+        p = data_dir() / "resume_snip.txt"
+        if p.is_file():
+            try:
+                out["resume_snip"] = p.read_text(encoding="utf-8")
+            except Exception:
+                pass
+    return out
+
+
 def set_profile(name: str) -> dict[str, Any]:
     load_profile(name)
     s = ss.update_active(profile=name)
@@ -155,9 +307,10 @@ def set_profile(name: str) -> dict[str, Any]:
 
 
 def push_context(context: str, *, append: bool = True) -> dict[str, Any]:
-    """Update active session context pack. Live: audio top-up (+ DC best-effort).
+    """Update active session pack; if Live, queue uplink TTS top-up (what's new).
 
     Default append=True so mid-call /btw-topup adds facts instead of wiping the pack.
+    Product inject is short spoken audio on the mic uplink (DC plain is best-effort).
     """
     active = ss.get_active()
     delta = (context or "").strip()
@@ -178,8 +331,7 @@ def push_context(context: str, *, append: bool = True) -> dict[str, Any]:
     save_state(st)
 
     live_ok = False
-    if _pid_running():
-        # Plain-text DC inject of delta; full_context keeps runtime pack consistent
+    if _pid_running() and delta:
         push_command(
             "push_context",
             context=delta,
@@ -195,8 +347,10 @@ def push_context(context: str, *, append: bool = True) -> dict[str, Any]:
         "appended": bool(append and prior and delta),
         "instructions_chars": len(instructions),
         "preview": full[:240].replace("\n", " "),
+        "delta_preview": delta[:200].replace("\n", " "),
         "session": s["name"],
         "live_push_queued": live_ok,
+        "inject": "audio_topup" if live_ok else "stored_only",
     }
 
 
@@ -219,11 +373,11 @@ def preview_instructions(
         "session_payload": build_voice_session_payload(prof),
         "instruction_events": instruction_events(instructions),
         "how_it_works": (
-            "Profile system prompt + channel contract + session context "
-            "→ written to instructions.txt → on DC open, one plain-text session "
-            "compact (not Realtime JSON; not TTS unless BTW_AUDIO_BOOT=1). "
-            "Mid-call: push_context appends pack + plain-text DC entry "
-            "(BTW_AUDIO_TOPUP=1 for optional TTS)."
+            "After VC init: one plain-text session brief (facts + role). "
+            "Mid-call /btw-topup: appends pack locally + one plain-text "
+            "'what's new' DC message only (not full history). "
+            "Product inject = uplink TTS (default). Disable with BTW_NO_AUDIO_INJECT=1. "
+            "DC plain is best-effort only; Realtime JSON only if BTW_DC_REALTIME=1."
         ),
     }
 
@@ -244,11 +398,18 @@ def prepare_start(profile: str | None = None) -> dict[str, Any]:
     if profile and profile != active.profile:
         ss.update_active(profile=profile)
         context = ss.get_active().context or ""
+        active = ss.get_active()
     instructions = prof.assemble_instructions(context)
     voice_id = str(uuid.uuid4()).upper()
     speak = ss.effective_voice(active)
+    cid = (active.conversation_id or "").strip()
+    hydrate = hydrate_resume_for_active()
+    resume_snip = hydrate.get("resume_snip") or ""
     session_payload = build_voice_session_payload(
-        prof, voice_session_id=voice_id, voice=speak
+        prof,
+        voice_session_id=voice_id,
+        voice=speak,
+        conversation_id=cid or None,
     )
 
     (data_dir() / "context.txt").write_text(context, encoding="utf-8")
@@ -260,6 +421,11 @@ def prepare_start(profile: str | None = None) -> dict[str, Any]:
         "voice_session_id": voice_id,
         "instructions_chars": len(instructions),
         "context_chars": len(context),
+        "conversation_id": cid or None,
+        "resume": bool(cid),
+        "resume_chars": len(resume_snip),
+        "resume_title": hydrate.get("title") or None,
+        "hydrate_error": hydrate.get("error"),
         "session": session_payload,
     }
     (data_dir() / "last_prepare.json").write_text(json.dumps(slim, indent=2), encoding="utf-8")
@@ -320,10 +486,20 @@ def start(
         "profile": active.profile,
         "voice": speak,
         "instructions_chars": prep.get("instructions_chars"),
+        "conversation_id": prep.get("conversation_id"),
+        "resume": prep.get("resume"),
+        "resume_chars": prep.get("resume_chars"),
         "muted": muted,
         "runtime": spawn,
         "viz": spawn.get("viz"),
-        "hint": "Speak on mic. Visualizer opens with Live. Mute: btw_mute. Stop: btw_stop.",
+        "hint": (
+            "Speak on mic. Visualizer opens with Live. Mute: btw_mute. Stop: btw_stop."
+            + (
+                f" Resuming conversation {str(prep.get('conversation_id'))[:8]}…"
+                if prep.get("resume")
+                else " Unbound Live (btw_session_bind to attach a ChatGPT thread)."
+            )
+        ),
     }
 
 

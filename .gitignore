@@ -14,5 +14,6 @@ __pycache__/
 .env
 .pytest_cache/
 .ruff_cache/
+uv.lock
 # never ship local plugin data
 .btw-data/

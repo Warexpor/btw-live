@@ -103,10 +103,11 @@ html, body {
   background: transparent;
   color: var(--ash);
   transition:
-    background 280ms ease,
-    color 280ms ease,
-    border-color 280ms ease,
-    opacity 280ms ease;
+    background 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .chip-live {
@@ -205,7 +206,12 @@ body.mode-focus .focus-exit:focus {
   padding: 8px 18px;
   border-radius: 9999px;
   cursor: pointer;
-  transition: background 140ms ease, border-color 140ms ease, opacity 160ms ease;
+  transition:
+    background 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms ease,
+    box-shadow 320ms ease;
 }
 
 .pill:hover {
@@ -225,6 +231,22 @@ body.mode-focus .focus-exit:focus {
 .pill-ghost:hover {
   color: var(--white);
   border-color: var(--ash);
+}
+
+/* Mute button — eases into sunset when mic is off */
+.pill.pill-muted,
+body.muted #btnMute {
+  border-color: rgba(255, 122, 23, 0.55);
+  color: var(--sunset);
+  background: rgba(255, 122, 23, 0.08);
+  box-shadow: 0 0 0 1px rgba(255, 122, 23, 0.12);
+}
+
+.pill.pill-muted:hover,
+body.muted #btnMute:hover {
+  border-color: rgba(255, 122, 23, 0.75);
+  background: rgba(255, 122, 23, 0.14);
+  color: #ff9a4a;
 }
 
 /* ── horizontal stage ──────────────────────────────── */
@@ -247,6 +269,7 @@ body.mode-focus .focus-exit:focus {
   background: #0a0a0a;
   overflow: hidden;
   min-height: 0;
+  transition: border-color 360ms ease, border-radius 360ms ease;
 }
 
 #orb {
@@ -269,12 +292,16 @@ body.mode-focus .focus-exit:focus {
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--ash);
-  transition: opacity 220ms ease, color 200ms ease;
+  transition:
+    opacity 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 380ms cubic-bezier(0.22, 1, 0.36, 1);
   pointer-events: none;
+  z-index: 2;
 }
 
 .orb-label.hot { color: var(--white); }
 .orb-label.warn { color: var(--sunset); }
+.orb-label.orb-label-fade { opacity: 0; }
 
 /* Speaking is orb-only energy (app.js). Do NOT hide chrome/meta — that
    opacity thrash read as "flashy UI" and was not smooth. */
@@ -325,6 +352,7 @@ body.speaking .orb-label.hot {
   color: var(--body);
   letter-spacing: 0.04em;
   font-variant-numeric: tabular-nums;
+  transition: color 280ms ease;
 }
 
 .seg-track {
@@ -337,11 +365,14 @@ body.speaking .orb-label.hot {
 .seg {
   border-radius: 2px;
   background: #181818;
-  /* longer transition = meters don't strobe on 50ms polls */
-  transition: background 90ms linear;
+  /* longer transition = meters ease on mute/speak and 50ms polls */
+  transition:
+    background 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 140ms ease;
 }
 
-.seg.on { background: #6e7176; }
+.seg.on { background: #6e7176; opacity: 1; }
+.seg.on.partial { opacity: 0.55; }
 .seg.on.hot { background: var(--body); }
 .seg.on.peak { background: var(--white); }
 .seg.on.warn { background: #a34a12; }
@@ -394,6 +425,7 @@ body.speaking .orb-label.hot {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: color 360ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .meta-item .v.warn { color: var(--sunset); }
@@ -410,8 +442,17 @@ body.speaking .orb-label.hot {
   text-transform: uppercase;
   color: var(--ash);
   opacity: 0.7;
-  transition: opacity 220ms ease;
+  transition: opacity 320ms ease, color 320ms ease;
   margin-top: auto;
+}
+
+/* soft shell opacity when focus is about to leave (instant layout still) */
+body.mode-focus .shell {
+  transition: none;
+}
+
+body.muted .meter:first-child .pct {
+  color: var(--sunset);
 }
 
 /* compact wide screens */

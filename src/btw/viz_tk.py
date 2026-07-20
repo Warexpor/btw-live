@@ -194,6 +194,13 @@ class VizApp:
         self._last_meta: dict[str, Any] = {}
         self._muted = False
         self._live = False
+        # soft mode blends 0..1
+        self._mix_live = 0.0
+        self._mix_mute = 0.0
+        self._mix_speak = 0.0
+        self._speak_latch = 0.0
+        self._label_hold = ""
+        self._label_hold_until = 0.0
 
         self._build()
         self._tick()
@@ -634,11 +641,16 @@ class VizApp:
 
         up_raw = _level(m.get("uplink_peak", 0))
         down_raw = _level(m.get("downlink_peak", 0))
-        self._up_disp = self._up_disp * 0.5 + up_raw * 0.5
-        self._down_disp = self._down_disp * 0.5 + down_raw * 0.5
+        # slower envelope — snappy 0.5/0.5 felt jumpy
+        def _ease(cur: float, tgt: float, atk: float = 0.22, rel: float = 0.1) -> float:
+            k = atk if tgt > cur else rel
+            return cur + (tgt - cur) * k
+
+        self._up_disp = _ease(self._up_disp, up_raw)
+        self._down_disp = _ease(self._down_disp, down_raw)
         if not live:
-            self._up_disp *= 0.88
-            self._down_disp *= 0.88
+            self._up_disp *= 0.92
+            self._down_disp *= 0.92
 
         self._hist_up.append(self._up_disp)
         self._hist_down.append(self._down_disp)
@@ -646,6 +658,19 @@ class VizApp:
         muted = bool(m.get("muted"))
         injecting = bool(m.get("injecting"))
         self._muted = muted
+        now = time.monotonic()
+        want_speak = live and self._down_disp > 0.1 and not muted
+        if want_speak:
+            self._speak_latch = now
+        speaking = want_speak or (self._speak_latch and now - self._speak_latch < 1.1)
+        # soft mixes
+        def _mix(cur: float, tgt: float, k: float = 0.12) -> float:
+            return cur + (tgt - cur) * k
+
+        self._mix_live = _mix(self._mix_live, 1.0 if live else 0.0, 0.1)
+        self._mix_mute = _mix(self._mix_mute, 1.0 if (live and muted) else 0.0, 0.1)
+        self._mix_speak = _mix(self._mix_speak, 1.0 if speaking else 0.0, 0.12)
+
         session = str(m.get("session_name") or "—")
         profile = str(m.get("profile") or "—")
         voice = str(m.get("voice") or "—")
@@ -655,20 +680,27 @@ class VizApp:
 
         self._set_status_chip(status, live)
 
+        # hold labels ~0.45s so idle/muted/talk don't flash
         if live and injecting:
-            self.lbl_orb.configure(text="INJECTING CONTEXT", fg=BODY)
+            want_lbl, want_fg = "INJECTING CONTEXT", BODY
         elif live and muted:
-            self.lbl_orb.configure(text="MIC MUTED", fg=SUNSET)
-        elif live and self._down_disp > 0.12:
-            self.lbl_orb.configure(text="SHE IS SPEAKING", fg=WHITE)
+            want_lbl, want_fg = "MIC MUTED", SUNSET
+        elif live and speaking:
+            want_lbl, want_fg = "SHE IS SPEAKING", WHITE
         elif live and self._up_disp > 0.12:
-            self.lbl_orb.configure(text="YOU ARE SPEAKING", fg=BODY)
+            want_lbl, want_fg = "YOU ARE SPEAKING", BODY
         elif live:
-            self.lbl_orb.configure(text="LISTENING", fg=ASH)
+            want_lbl, want_fg = "LISTENING", ASH
         elif status == "stopped":
-            self.lbl_orb.configure(text="CALL ENDED", fg=ASH)
+            want_lbl, want_fg = "CALL ENDED", ASH
         else:
-            self.lbl_orb.configure(text="WAITING FOR LIVE", fg=ASH)
+            want_lbl, want_fg = "WAITING FOR LIVE", ASH
+        if want_lbl != self._label_hold and now >= self._label_hold_until:
+            self._label_hold = want_lbl
+            self._label_hold_until = now + 0.35
+            self.lbl_orb.configure(text=want_lbl, fg=want_fg)
+        elif want_lbl == self._label_hold:
+            self.lbl_orb.configure(text=want_lbl, fg=want_fg)
 
         self.btn_mute.set_text("Unmute" if muted else "Mute")
 

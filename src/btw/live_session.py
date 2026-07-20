@@ -1,13 +1,14 @@
 """Standalone Live session: mint + aiortc + local audio + control IPC.
 
-Context delivery (product):
-  Plain-text datachannel entries — not TTS, not Realtime JSON envelopes.
-  Realtime-style session.update/response.create often closes Wingman PC.
+Context delivery (product — 0.5.36+):
+  Wingman only reliably hears the **audio uplink**. Plain DC is best-effort
+  (channel often closes in <100ms; agent does not treat plain UTF-8 as context).
 
-  - On DC open: plain-text session brief + context entries
-  - Mid-call top-up: plain-text entry on open DC
-  - Optional audio TTS only if BTW_AUDIO_BOOT / BTW_AUDIO_TOPUP = 1
-  - Optional Realtime JSON only if BTW_DC_REALTIME = 1
+  - Boot / top-up primary: short SAPI TTS on the mic uplink (default ON)
+  - Disable: BTW_NO_AUDIO_INJECT=1 (or BTW_AUDIO_BOOT=0 / BTW_AUDIO_TOPUP=0)
+  - DC plain still attempted if channel open (not sufficient alone)
+  - Primary DC: oai-events (BTW_DC_NEGOTIATED=1 for experimental id=0)
+  - Realtime multi-JSON only if BTW_DC_REALTIME=1 (often kills PC)
 """
 from __future__ import annotations
 
@@ -36,15 +37,30 @@ from .session_json import (
     build_voice_session_payload,
     context_push_events,
     instruction_events,
-    plain_boot_entries,
-    plain_topup_entry,
+    plain_boot_message,
+    plain_topup_message,
 )
 
 log = logging.getLogger("btw.live")
 
-# Keep spoken injects short — long TTS blocks the mic
-AUDIO_BRIEF_MAX = 320
-AUDIO_TOPUP_MAX = 280
+# Spoken inject caps — product path is uplink TTS (DC ignored by Wingman).
+# Keep under INJECT_MAX_SAMPLES (~60s); denser pack still fits in one brief.
+AUDIO_BRIEF_MAX = 3200  # ~1 min of SAPI room for real session pack
+AUDIO_TOPUP_MAX = 1200
+# Wait after PC connected before speaking brief (let media settle)
+AUDIO_BOOT_SETTLE_S = 0.45
+
+# Product DC label for standalone mint (stable multi-minute sessions).
+DC_LABEL = "oai-events"
+# Browser Wingman uses createDataChannel("", {negotiated:true, id:0}) — but that
+# SDP shape makes /realtime/wm close the PeerConnection under aiortc (0 frames).
+# Keep constant for opt-in experiments only (BTW_DC_NEGOTIATED=1).
+DC_NEGOTIATED_ID = 0
+# Deferred path only (BTW_DC_DEFER_BOOT=1): wait inbound or this timeout
+BOOT_INJECT_WAIT_S = 0.75
+BOOT_INJECT_SETTLE_S = 0.05
+# One retry if first send returned 0 while channel still open
+BOOT_INJECT_RETRY_S = 0.15
 
 
 def _log(msg: str) -> None:
@@ -67,30 +83,85 @@ def _clip(text: str, limit: int) -> str:
     return t[:limit] + " …"
 
 
-def spoken_bootstrap(instructions: str, context: str = "") -> str:
-    """What we speak at call start so the voice agent has session ground truth."""
-    ctx = (context or "").strip()
-    ins = (instructions or "").strip()
-    body = ctx if ctx else ins
-    body = _clip(body, AUDIO_BRIEF_MAX)
-    if not body:
-        return (
-            "BTW V C session. You are a voice advisor for a Grok Build coding "
-            "session. You cannot edit files. Wait for the user."
-        )
-    return (
-        "Session brief. Voice advisor for Grok Build. Cannot edit files. "
-        f"Context: {body}"
+def _speech_normalize(text: str) -> str:
+    """Make pack text speakable: strip markdown chrome, keep facts."""
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines: list[str] = []
+    for raw in t.split("\n"):
+        s = raw.strip()
+        if not s:
+            continue
+        # drop pure markdown decoration
+        if s.startswith("#"):
+            s = s.lstrip("#").strip()
+        if s.startswith("```") or s in ("---", "***", "___"):
+            continue
+        s = s.replace("**", "").replace("__", "").replace("`", "")
+        s = " ".join(s.split())
+        if s:
+            lines.append(s)
+    # Join with period-space so ASR gets complete clauses, not one giant run-on
+    out = ". ".join(lines)
+    out = out.replace("..", ".").replace(" .", ".")
+    return out.strip(" .")
+
+
+def spoken_bootstrap(
+    instructions: str,
+    context: str = "",
+    *,
+    resume_snip: str = "",
+) -> str:
+    """Full spoken session brief for call start (product inject path).
+
+    Prefers the session context pack; falls back to assembled instructions.
+    When resume_snip is set (ChatGPT conversation hydrate), prior voice turns
+    are spoken first so the model continues that thread's facts.
+    """
+    ctx = _speech_normalize(context)
+    ins = _speech_normalize(instructions)
+    resume = _speech_normalize(resume_snip)
+    # Prefer pack; if instructions are much richer, use them
+    if ctx and ins and len(ins) > len(ctx) * 1.4 and ctx not in ins:
+        body = ins
+    else:
+        body = ctx or ins
+    # Budget: leave room for resume when present
+    resume_budget = min(1200, AUDIO_BRIEF_MAX // 2) if resume else 0
+    body_budget = AUDIO_BRIEF_MAX - resume_budget - 80
+    body = _clip(body, max(400, body_budget))
+    if resume:
+        resume = _clip(resume, resume_budget)
+    role = (
+        "Binding session brief for this voice call. "
+        "You are the voice advisor for a Grok Build coding session. "
+        "Grok implements code; you only advise. "
+        "You cannot edit files or run tools. "
+        "Treat the following as ground truth for this call"
     )
+    parts = [role]
+    if resume:
+        parts.append(
+            "Prior voice turns from this ChatGPT conversation — continue from them"
+        )
+        parts.append(resume)
+    if body:
+        parts.append("Current Grok session facts")
+        parts.append(body)
+    elif not resume:
+        parts.append("Wait for the user")
+    return ". ".join(parts)
 
 
 def spoken_topup(delta: str) -> str:
-    """What we speak when context is topped up mid-call."""
-    d = _clip(delta, AUDIO_TOPUP_MAX)
+    """Spoken mid-call top-up: what's new only, enough detail to merge."""
+    d = _speech_normalize(delta)
+    d = _clip(d, AUDIO_TOPUP_MAX)
     if not d:
         return ""
     return (
-        "Context update. Add this to the session facts and keep prior context. "
+        "Mid-call context update. Merge these new facts into the session; "
+        "do not drop earlier facts. "
         f"{d}"
     )
 
@@ -108,10 +179,15 @@ class LiveSession:
         voice: str | None = None,
         on_dc_message: Optional[Callable[[str], None]] = None,
         context: str = "",
+        conversation_id: str = "",
+        resume_snip: str = "",
+        voice_session_id: str | None = None,
     ):
         self.profile = profile
         self.instructions = instructions
         self.context = context or ""
+        self.conversation_id = (conversation_id or "").strip()
+        self.resume_snip = resume_snip or ""
         self.use_mic = use_mic
         self.use_speaker = use_speaker
         self.session_name = session_name
@@ -121,13 +197,20 @@ class LiveSession:
         self.pc: Optional[RTCPeerConnection] = None
         self.speaker: Optional[SpeakerPlayer] = None
         self.mic_track: Optional[InjectableUplinkTrack] = None
-        self.voice_session_id = str(uuid.uuid4()).upper()
+        # New Live leg UUID by default; conversation_id is the long-lived thread
+        self.voice_session_id = (voice_session_id or str(uuid.uuid4())).upper()
         self.stats: dict[str, Any] = {}
         self._dc = None
         self._closed = asyncio.Event()
         self._muted = bool(muted)
         self._stop_requested = False
         self._inbox_path = data_dir() / "dc_inbox.jsonl"
+        self._boot_inject_done = False
+        self._boot_inject_task: Optional[asyncio.Task] = None
+        self._audio_boot_done = False
+        self._audio_boot_task: Optional[asyncio.Task] = None
+        self._dc_first_inbound = asyncio.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def set_muted(self, muted: bool) -> None:
         self._muted = bool(muted)
@@ -212,6 +295,17 @@ class LiveSession:
     def _env_flag(name: str) -> bool:
         return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
+    def _audio_inject_enabled(self) -> bool:
+        """Product default ON — wingman only reliably consumes uplink audio."""
+        if self._env_flag("BTW_NO_AUDIO_INJECT"):
+            return False
+        # Explicit disable of either legacy flag turns audio inject off
+        for name in ("BTW_AUDIO_BOOT", "BTW_AUDIO_TOPUP"):
+            raw = os.environ.get(name)
+            if raw is not None and raw.strip().lower() in ("0", "false", "no"):
+                return False
+        return True
+
     def _send_events(self, channel, events: list[dict[str, Any]], tag: str) -> int:
         n = 0
         for ev in events:
@@ -226,48 +320,191 @@ class LiveSession:
                 _log(f"dc_send err: {e}")
         return n
 
+    def _send_plain_one(self, channel, text: str, tag: str) -> bool:
+        """Send exactly one plain UTF-8 string on the datachannel. Returns True if sent."""
+        t = (text or "").strip()
+        if not t:
+            return False
+        try:
+            channel.send(t)
+            self.stats.setdefault("dc_events", []).append("plain_text")
+            self._append_inbox("out", t, {"tag": tag, "type": "plain_text", "i": 0})
+            _log(f"dc_plain[{tag}] chars={len(t)} (single message)")
+            return True
+        except Exception as e:
+            _log(f"dc_plain err: {e}")
+            return False
+
     def _send_plain_texts(self, channel, texts: list[str], tag: str) -> int:
-        """Product path: raw UTF-8 strings on the datachannel (not Realtime JSON)."""
+        """Send plain strings (top-up / reinject). Prefer one element."""
         n = 0
         for i, text in enumerate(texts):
-            t = (text or "").strip()
-            if not t:
-                continue
-            try:
-                channel.send(t)
-                self.stats.setdefault("dc_events", []).append("plain_text")
-                self._append_inbox(
-                    "out", t, {"tag": tag, "type": "plain_text", "i": i}
-                )
-                _log(f"dc_plain[{tag}] i={i} chars={len(t)}")
+            if self._send_plain_one(channel, text, f"{tag}:{i}" if i else tag):
                 n += 1
-            except Exception as e:
-                _log(f"dc_plain err: {e}")
         return n
 
-    def _boot_inject_sync(self, channel) -> None:
-        """Inject session brief + context as plain text on DC open."""
+    def _boot_inject_sync(self, channel, *, tag: str = "boot") -> int:
+        """After VC init: send exactly ONE plain structured brief (or Realtime if forced).
+
+        Product path never multi-sends. Returns 1 if the single message went out, else 0.
+        """
+        if self._boot_inject_done:
+            _log(f"boot_inject skip: already sent tag={tag}")
+            return 0
         try:
             if getattr(channel, "readyState", None) != "open":
-                return
+                _log(f"boot_inject skip: readyState={getattr(channel, 'readyState', '?')}")
+                return 0
             if self._env_flag("BTW_DC_REALTIME"):
+                # Dev-only multi-JSON path — not product
                 n = self._send_events(
-                    channel, instruction_events(self.instructions), "boot"
+                    channel, instruction_events(self.instructions), tag
                 )
                 self.stats["boot_events"] = n
                 self.stats["dc_injection_sent"] = n > 0
-                _log(f"boot_dc realtime sent={n} ready={getattr(channel, 'readyState', '?')}")
-                return
+                if n > 0:
+                    self._boot_inject_done = True
+                _log(
+                    f"boot_dc realtime tag={tag} sent={n} "
+                    f"ready={getattr(channel, 'readyState', '?')}"
+                )
+                return 1 if n > 0 else 0
 
-            entries = plain_boot_entries(self.instructions, self.context)
-            n = self._send_plain_texts(channel, entries, "boot")
-            self.stats["boot_events"] = n
-            self.stats["dc_injection_sent"] = n > 0
+            msg = plain_boot_message(self.instructions, self.context)
+            if not msg:
+                _log("boot_inject skip: empty plain_boot_message")
+                return 0
+            ok = self._send_plain_one(channel, msg, tag)
+            self.stats["boot_events"] = 1 if ok else 0
+            self.stats["dc_injection_sent"] = ok
+            self.stats["boot_chars"] = len(msg) if ok else 0
+            if ok:
+                # Once sent, never send another boot message this call
+                self._boot_inject_done = True
             _log(
-                f"boot_dc plain sent={n} entries ready={getattr(channel, 'readyState', '?')}"
+                f"boot_dc plain tag={tag} ok={ok} chars={len(msg)} "
+                f"ready={getattr(channel, 'readyState', '?')}"
             )
+            return 1 if ok else 0
         except Exception as e:
             _log(f"boot_inject err: {e}")
+            return 0
+
+    def _arm_boot_inject(self, channel) -> None:
+        """Send exactly one boot plain message. Default: immediate on open.
+
+        Server often closes the DC within ~100ms with no inbound frames, so the
+        deferred wait path never gets a send window. Opt-in defer: BTW_DC_DEFER_BOOT=1.
+        """
+        if self._boot_inject_done or self._boot_inject_task is not None:
+            return
+        if self._env_flag("BTW_DC_DEFER_BOOT"):
+            loop = self._loop
+            if loop is None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    self._loop = loop
+                except RuntimeError:
+                    _log("boot_inject arm: no loop — sync immediate")
+                    self._boot_inject_sync(channel, tag="boot_sync")
+                    return
+            self._boot_inject_task = loop.create_task(
+                self._deferred_boot_inject(channel), name="btw-boot-inject"
+            )
+            _log("boot_inject armed (deferred BTW_DC_DEFER_BOOT=1)")
+            return
+        # Product path: send now while readyState is still open.
+        n = self._boot_inject_sync(channel, tag="boot_open")
+        self.stats["boot_inject_reason"] = "open" if n > 0 else "open+failed"
+        if n > 0:
+            self._publish_status()
+            return
+        # Channel already closed or send failed — one short retry on loop if any.
+        loop = self._loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+                self._loop = loop
+            except RuntimeError:
+                return
+        self._boot_inject_task = loop.create_task(
+            self._boot_inject_retry_once(channel), name="btw-boot-retry"
+        )
+
+    async def _boot_inject_retry_once(self, channel) -> None:
+        """Single delayed retry only if first open send returned 0. Never double-send."""
+        if self._boot_inject_done or self._closed.is_set():
+            return
+        try:
+            await asyncio.sleep(BOOT_INJECT_RETRY_S)
+        except asyncio.CancelledError:
+            return
+        if self._boot_inject_done or self._closed.is_set():
+            return
+        ch = self._dc if self._dc is not None else channel
+        if getattr(ch, "readyState", None) != "open":
+            _log("boot_inject retry skip: channel not open")
+            self.stats["boot_inject_reason"] = "open+failed"
+            self._publish_status()
+            return
+        n = self._boot_inject_sync(ch, tag="boot_retry")
+        self.stats["boot_inject_reason"] = "open+retry" if n > 0 else "open+failed"
+        self._publish_status()
+
+    async def _deferred_boot_inject(self, channel) -> None:
+        """BTW_DC_DEFER_BOOT only: wait inbound/timeout then one plain brief."""
+        if self._boot_inject_done or self._closed.is_set():
+            return
+        reason = "timeout"
+        try:
+            await asyncio.wait_for(
+                self._dc_first_inbound.wait(), timeout=BOOT_INJECT_WAIT_S
+            )
+            reason = "first_inbound"
+            await asyncio.sleep(BOOT_INJECT_SETTLE_S)
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            return
+
+        if self._boot_inject_done or self._closed.is_set():
+            return
+
+        for _ in range(20):
+            ice = None
+            if self.pc is not None:
+                ice = getattr(self.pc, "iceConnectionState", None)
+            if ice in ("connected", "completed", None):
+                break
+            if ice in ("failed", "closed"):
+                _log(f"boot_inject abort ice={ice}")
+                return
+            await asyncio.sleep(0.05)
+
+        n = self._boot_inject_sync(channel, tag=f"boot_{reason}")
+        if n > 0:
+            self.stats["boot_inject_reason"] = reason
+            self._publish_status()
+            return
+
+        _log(f"boot_inject retry in {BOOT_INJECT_RETRY_S}s (first sent nothing)")
+        try:
+            await asyncio.sleep(BOOT_INJECT_RETRY_S)
+        except asyncio.CancelledError:
+            return
+        if self._boot_inject_done or self._closed.is_set():
+            return
+        ch = self._dc if self._dc is not None else channel
+        if getattr(ch, "readyState", None) != "open":
+            _log("boot_inject retry skip: channel not open")
+            self.stats["boot_inject_reason"] = f"{reason}+failed"
+            self._publish_status()
+            return
+        n2 = self._boot_inject_sync(ch, tag="boot_retry")
+        self.stats["boot_inject_reason"] = (
+            f"{reason}+retry" if n2 > 0 else f"{reason}+failed"
+        )
+        self._publish_status()
 
     def speak_text(self, text: str, *, tag: str = "speak") -> bool:
         """Queue TTS onto the uplink (opt-in fallback only)."""
@@ -292,19 +529,96 @@ class LiveSession:
             return False
 
     def speak_bootstrap(self) -> bool:
-        """Audio bootstrap — off unless BTW_AUDIO_BOOT=1 (plain text is primary)."""
-        if not self._env_flag("BTW_AUDIO_BOOT"):
-            _log("audio bootstrap skipped (plain-text DC is primary; BTW_AUDIO_BOOT=1 to force)")
+        """Queue spoken session brief on the uplink (product primary inject)."""
+        if not self._audio_inject_enabled():
+            _log("audio bootstrap skipped (BTW_NO_AUDIO_INJECT or AUDIO_*=0)")
             self.stats["bootstrap"] = False
             return False
-        return self.speak_text(
-            spoken_bootstrap(self.instructions, self.context), tag="bootstrap"
+        ok = self.speak_text(
+            spoken_bootstrap(
+                self.instructions,
+                self.context,
+                resume_snip=self.resume_snip,
+            ),
+            tag="bootstrap",
         )
+        self.stats["bootstrap"] = ok
+        self.stats["resume_chars"] = len(self.resume_snip or "")
+        if ok:
+            self._audio_boot_done = True
+        return ok
 
     def speak_context_topup(self, delta: str) -> bool:
-        if not self._env_flag("BTW_AUDIO_TOPUP"):
+        if not self._audio_inject_enabled():
+            _log("audio topup skipped (BTW_NO_AUDIO_INJECT or AUDIO_*=0)")
             return False
         return self.speak_text(spoken_topup(delta), tag="topup")
+
+    def _arm_audio_boot(self) -> None:
+        """Speak brief after media is up — default product inject path."""
+        if self._audio_boot_done or self._audio_boot_task is not None:
+            return
+        if not self._audio_inject_enabled():
+            self.stats["bootstrap"] = False
+            _log("audio boot not armed (disabled)")
+            return
+        loop = self._loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+                self._loop = loop
+            except RuntimeError:
+                _log("audio boot arm: no loop — sync speak")
+                self.speak_bootstrap()
+                return
+        self._audio_boot_task = loop.create_task(
+            self._audio_boot_when_live(), name="btw-audio-boot"
+        )
+        _log("audio boot armed (speak after PC connected)")
+
+    async def _audio_boot_when_live(self) -> None:
+        """Wait for connected media, then one uplink TTS brief."""
+        if self._audio_boot_done or self._closed.is_set():
+            return
+        try:
+            for _ in range(120):  # ~6s
+                if self._closed.is_set():
+                    return
+                st = getattr(self.pc, "connectionState", None) if self.pc else None
+                if st == "connected":
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                _log("audio boot: PC never connected — speaking anyway")
+            await asyncio.sleep(AUDIO_BOOT_SETTLE_S)
+        except asyncio.CancelledError:
+            return
+        if self._audio_boot_done or self._closed.is_set():
+            return
+        # Run blocking SAPI off the event loop
+        try:
+            ok = await asyncio.to_thread(
+                self.speak_text,
+                spoken_bootstrap(
+                    self.instructions,
+                    self.context,
+                    resume_snip=self.resume_snip,
+                ),
+                tag="bootstrap",
+            )
+        except Exception as e:
+            _log(f"audio boot err: {e}")
+            ok = False
+        self.stats["bootstrap"] = bool(ok)
+        self.stats["resume_chars"] = len(self.resume_snip or "")
+        if ok:
+            self._audio_boot_done = True
+            _log(
+                f"audio boot delivered on uplink resume_chars={self.stats['resume_chars']}"
+            )
+        else:
+            _log("audio boot failed")
+        self._publish_status()
 
     def reinject_instructions(self, instructions: str | None = None) -> bool:
         if instructions is not None:
@@ -317,16 +631,16 @@ class LiveSession:
                     ch, instruction_events(self.instructions), "reinject"
                 )
             else:
-                self._send_plain_texts(
+                self._send_plain_one(
                     ch,
-                    plain_boot_entries(self.instructions, self.context),
+                    plain_boot_message(self.instructions, self.context),
                     "reinject",
                 )
             ok_dc = True
         else:
-            _log("reinject: no open datachannel")
+            _log("reinject: no open datachannel (audio path still used)")
         ok_audio = False
-        if self._env_flag("BTW_AUDIO_BOOT"):
+        if self._audio_inject_enabled():
             ok_audio = self.speak_text(
                 spoken_bootstrap(self.instructions, self.context), tag="reinject"
             )
@@ -335,7 +649,7 @@ class LiveSession:
     def push_context_live(
         self, context_delta: str, *, full_context: str | None = None
     ) -> bool:
-        """Top-up context mid-call: store + plain-text DC entry (+ optional TTS)."""
+        """Mid-call top-up: pack update + uplink TTS (primary) + DC plain if open."""
         delta = (context_delta or "").strip()
         if full_context is not None:
             self.context = full_context
@@ -357,15 +671,23 @@ class LiveSession:
         ch = self._dc
         if ch and getattr(ch, "readyState", None) == "open" and delta:
             if self._env_flag("BTW_DC_REALTIME"):
-                self._send_events(ch, context_push_events(delta), "context")
+                n = self._send_events(ch, context_push_events(delta), "context")
+                ok_dc = n > 0
+                self.stats["topup_events"] = n
             else:
-                entry = plain_topup_entry(delta)
-                self._send_plain_texts(ch, [entry] if entry else [], "context")
-            ok_dc = True
+                msg = plain_topup_message(delta)
+                if msg:
+                    ok_dc = self._send_plain_one(ch, msg, "topup")
+                    self.stats["topup_events"] = 1 if ok_dc else 0
+                    self.stats["topup_chars"] = len(msg) if ok_dc else 0
+                    if ok_dc:
+                        _log(f"topup_dc plain ok chars={len(msg)} (best-effort)")
         elif delta:
-            _log("push_context: DC closed — text not delivered")
+            _log("push_context: DC closed — using audio uplink")
 
         ok_audio = self.speak_context_topup(delta) if delta else False
+        if ok_audio:
+            _log(f"topup_audio ok chars={len(delta)}")
         self._publish_status()
         return ok_audio or ok_dc
 
@@ -374,6 +696,8 @@ class LiveSession:
         self.stats.setdefault("dc_msgs", []).append(text[:500])
         self._append_inbox("in", text, {"label": label})
         _log(f"dc_msg[{label}] {text[:200]}")
+        if not self._dc_first_inbound.is_set():
+            self._dc_first_inbound.set()
         if self.on_dc_message:
             try:
                 self.on_dc_message(text)
@@ -384,6 +708,12 @@ class LiveSession:
         # Drop stop/mute orphans from a prior kill or ESC key-repeat so this
         # session does not die on the first control tick.
         clear_commands()
+        self._loop = asyncio.get_running_loop()
+        self._boot_inject_done = False
+        self._boot_inject_task = None
+        self._audio_boot_done = False
+        self._audio_boot_task = None
+        self._dc_first_inbound = asyncio.Event()
         _log(f"auth backend={self.client.backend} …")
         token = self.client.fetch_access_token()
         _log(f"accessToken ok len={len(token)}")
@@ -445,44 +775,79 @@ class LiveSession:
 
                 asyncio.ensure_future(_play())
 
-        def wire_dc(channel, label: str):
-            _log(f"dc wire {label} label={channel.label}")
+        def wire_dc(channel, label: str, *, primary: bool = False):
+            """Wire DC handlers. Boot inject only on primary channel."""
+            ch_id = getattr(channel, "id", None)
+            _log(
+                f"dc wire {label} label={channel.label!r} id={ch_id} "
+                f"primary={primary}"
+            )
 
             @channel.on("open")
             def on_open():
-                _log(f"dc_open {label}")
+                _log(f"dc_open {label} id={getattr(channel, 'id', None)}")
+                if primary or self._dc is None:
+                    self._dc = channel
                 self.stats["dc_open"] = True
-                self._dc = channel
-                self._boot_inject_sync(channel)
+                self.stats["dc_label"] = getattr(channel, "label", "") or ""
+                self.stats["dc_id"] = getattr(channel, "id", None)
+                if primary:
+                    self._arm_boot_inject(channel)
                 self._publish_status()
 
             @channel.on("message")
             def on_message(message):
+                if primary or self._dc is channel:
+                    self._dc = channel
                 self._handle_dc_message(message, label)
 
             @channel.on("close")
             def on_close():
-                _log(f"dc_close {label}")
+                # Plain inject often closes the DC; audio PC can stay live.
+                _log(f"dc_close {label} id={getattr(channel, 'id', None)}")
                 if self._dc is channel:
                     self.stats["dc_open"] = False
                 self._publish_status()
 
-            self._dc = channel
+            if primary:
+                self._dc = channel
 
         @pc.on("datachannel")
         def on_datachannel(channel):
-            wire_dc(channel, "remote")
+            wire_dc(channel, "remote", primary=False)
 
+        # Default: named oai-events. Negotiated empty id=0 kills this mint path
+        # under aiortc (PC closed at 0 speaker frames) — only if explicitly forced.
         try:
-            local_dc = pc.createDataChannel("oai-events")
-            wire_dc(local_dc, "local")
+            if self._env_flag("BTW_DC_NEGOTIATED"):
+                local_dc = pc.createDataChannel(
+                    "",
+                    negotiated=True,
+                    id=DC_NEGOTIATED_ID,
+                )
+                wire_dc(local_dc, "local-n0", primary=True)
+                _log(
+                    f"dc negotiated id={DC_NEGOTIATED_ID} label={local_dc.label!r} "
+                    f"(BTW_DC_NEGOTIATED=1 — experimental)"
+                )
+            else:
+                local_dc = pc.createDataChannel(DC_LABEL)
+                wire_dc(local_dc, "local", primary=True)
+                _log(f"dc label={DC_LABEL!r} id={getattr(local_dc, 'id', None)}")
         except Exception as e:
-            _log(f"createDataChannel failed: {e}")
+            _log(f"createDataChannel primary failed: {e}; fallback {DC_LABEL}")
+            try:
+                local_dc = pc.createDataChannel(DC_LABEL)
+                wire_dc(local_dc, "local-fallback", primary=True)
+            except Exception as e2:
+                _log(f"createDataChannel failed: {e2}")
 
         base = None
         if self.use_mic:
             try:
-                base = MicrophoneTrack()
+                # paced=False: InjectableUplinkTrack owns the 20ms clock.
+                # Double pacing caused delayed utterance dumps (no barge-in).
+                base = MicrophoneTrack(paced=False)
                 if self._muted:
                     base.set_muted(True)
                 self.stats["mic"] = "microphone"
@@ -499,13 +864,8 @@ class LiveSession:
         if self._muted:
             self.mic_track.set_muted(True)
         pc.addTrack(self.mic_track)
-
-        if self.speak_bootstrap():
-            self.stats["bootstrap"] = True
-            _log("bootstrap audio queued for uplink")
-        else:
-            self.stats["bootstrap"] = False
-            _log("bootstrap audio failed or empty")
+        # Do not block mint on SAPI — arm after PC is connected (product inject).
+        self.stats["bootstrap"] = False
 
         try:
             pc.addTransceiver("video", direction="recvonly")
@@ -525,18 +885,50 @@ class LiveSession:
             self.profile,
             voice_session_id=self.voice_session_id,
             voice=self.voice,
+            conversation_id=self.conversation_id or None,
         )
-        _log(f"mint offer_sdp_len={len(sdp_offer)} voice={session.get('voice')}")
-        answer_sdp = self.client.mint_realtime(sdp_offer, session)
-        _log(f"mint ok answer_sdp_len={len(answer_sdp)}")
+        _log(
+            f"mint offer_sdp_len={len(sdp_offer)} voice={session.get('voice')} "
+            f"conversation_id={session.get('conversation_id') or '-'}"
+        )
+        try:
+            answer_sdp = self.client.mint_realtime(sdp_offer, session)
+        except RuntimeError as e:
+            # Bind fields may 4xx — retry unbound mint, keep hydrate resume_snip
+            if self.conversation_id and "conversation_id" in session:
+                _log(f"mint with conversation bind failed, retry unbound: {e}")
+                session = build_voice_session_payload(
+                    self.profile,
+                    voice_session_id=self.voice_session_id,
+                    voice=self.voice,
+                    conversation_id=None,
+                    bind_conversation=False,
+                )
+                answer_sdp = self.client.mint_realtime(sdp_offer, session)
+                self.stats["mint_bind"] = "retry_unbound"
+            else:
+                raise
+        else:
+            self.stats["mint_bind"] = (
+                "bound" if session.get("conversation_id") else "none"
+            )
+        _log(f"mint ok answer_sdp_len={len(answer_sdp)} bind={self.stats.get('mint_bind')}")
         self.stats["mint"] = 201
         self.stats["answer_len"] = len(answer_sdp)
+        self.stats["conversation_id"] = self.conversation_id or None
 
         await pc.setRemoteDescription(
             RTCSessionDescription(sdp=answer_sdp, type="answer")
         )
         self.stats["voice_session_id"] = self.voice_session_id
         self.stats["ok"] = True
+        try:
+            from . import sessions_store as ss
+
+            ss.set_last_voice_session(self.voice_session_id)
+        except Exception as e:
+            _log(f"persist last_voice_session_id err: {e}")
+        self._arm_audio_boot()
         self._publish_status()
         return self.stats
 
@@ -564,12 +956,17 @@ class LiveSession:
                 elif cmd in ("push_context", "speak_context", "topup_context"):
                     delta = rec.get("context") or rec.get("text") or ""
                     full = rec.get("full_context")
-                    self.push_context_live(delta, full_context=full)
+                    # SAPI is blocking — keep control/meters loop responsive
+                    await asyncio.to_thread(
+                        self.push_context_live, delta, full_context=full
+                    )
                 elif cmd == "set_muted":
                     self.set_muted(bool(rec.get("muted")))
             ticks += 1
-            # ~20 Hz meters for visualizer; full status ~2s
-            self._publish_meters()
+            # ~10 Hz meters (disk write); full status ~2s — high-rate JSON I/O
+            # was competing with the audio callback under load.
+            if ticks % 2 == 0:
+                self._publish_meters()
             if ticks % 40 == 0:
                 self._publish_status()
             await asyncio.sleep(0.05)
@@ -595,6 +992,15 @@ class LiveSession:
         return self.stats
 
     async def stop(self) -> None:
+        for attr in ("_boot_inject_task", "_audio_boot_task"):
+            task = getattr(self, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            setattr(self, attr, None)
         if self.mic_track is not None:
             try:
                 self.mic_track.stop()
@@ -628,7 +1034,42 @@ class LiveSession:
         }
         write_live_status(stopped)
         write_meters(stopped)
+        # Best-effort: auto-bind conversation if we only have voice_session_id
+        try:
+            await asyncio.to_thread(self._try_discover_conversation)
+        except Exception as e:
+            _log(f"conversation discover err: {e}")
         _log("session stopped")
+
+    def _try_discover_conversation(self) -> None:
+        """If unbound, search recent ChatGPT threads for this Live leg's voice id."""
+        from . import sessions_store as ss
+
+        active = ss.get_active()
+        if (active.conversation_id or "").strip():
+            return
+        vid = self.voice_session_id
+        if not vid:
+            return
+        try:
+            found = self.client.find_conversation_by_voice_session(vid)
+        except Exception as e:
+            _log(f"find_conversation: {e}")
+            return
+        if not found:
+            _log(f"discover: no conversation for voice_session_id={vid[:12]}…")
+            return
+        try:
+            ss.bind_active_conversation(
+                found,
+                last_voice_session_id=vid,
+            )
+            self.conversation_id = found
+            self.stats["conversation_id"] = found
+            self.stats["discovered"] = True
+            _log(f"discover: bound conversation_id={found}")
+        except Exception as e:
+            _log(f"discover bind err: {e}")
 
 
 async def run_live(

@@ -12,8 +12,8 @@ Separate Live voice channel. Not the coding agent.
 1. **Profile** = system rules (`sessions/*.toml`: default / debugger / architect).
 2. **Session** = named pack: profile + context text.
 3. **Context** = short Grok facts (goal, files, errors). Stored on the active session.
-4. On **start**, context is injected as **plain-text datachannel entries** (not TTS). Audio TTS only if `BTW_AUDIO_BOOT=1`.
-5. Mid-call: `/btw-topup` → `btw_push_context` appends pack + plain-text DC entry (`BTW_AUDIO_TOPUP=1` for TTS too).
+4. On **start**, context is spoken onto the mic uplink (short SAPI TTS) after PC connects — Wingman only reliably hears audio. DC plain is best-effort. Disable with `BTW_NO_AUDIO_INJECT=1`.
+5. Mid-call: `/btw-topup` → `btw_push_context` appends pack + spoken delta on uplink (same path).
 
 ## User phrases → tools
 
@@ -28,7 +28,7 @@ Separate Live voice channel. Not the coding agent.
 | `/btw-session-use` | `btw_session_use` |
 | `/btw-session-delete` | `btw_session_delete` |
 | `/btw-voice` | `btw_list_voices` / `btw_set_voice` |
-| `/btw-topup` / push context | `btw_push_context` (append + plain-text DC) |
+| `/btw-topup` / push context | `btw_push_context` (append pack + uplink TTS delta) |
 | reinject prompt | `btw_reinject` |
 | doctor | `btw_doctor` |
 
@@ -37,8 +37,9 @@ Separate Live voice channel. Not the coding agent.
 1. Cookies ok (`btw_status`).
 2. Active session + profile correct.
 3. Context snip if useful (≤4–6k).
-4. `btw_start` (auto-opens visualizer unless `BTW_NO_VIZ`).
-5. One short confirm: live / muted / session name / viz. No secrets.
+4. **Resume (optional):** if active session has `conversation_id` / `resume: true`, start hydrates prior ChatGPT voice turns and mints with that id. Bind with `/btw-session-bind`; clear with `/btw-session-fresh`; refresh metadata with `/btw-session-sync`.
+5. `btw_start` (auto-opens visualizer unless `BTW_NO_VIZ`).
+6. One short confirm: live / muted / session name / resume? / viz. No secrets.
 
 ## Rules
 

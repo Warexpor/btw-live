@@ -26,6 +26,9 @@
     // sticky last-good meters — empty/failed reads must not paint IDLE for one frame
     lastGood: null,
     missPolls: 0,
+    // continuous 0..1 mode mixes (frame-eased — no hard snaps)
+    mix: { live: 0, muted: 0, speak: 0, inject: 0, you: 0 },
+    tgt: { live: 0, muted: 0, speak: 0, inject: 0, you: 0 },
   };
 
   const el = {
@@ -112,25 +115,44 @@
     return cur + (target - cur) * release;
   }
 
+  function easeMix(cur, target, k, dt) {
+    const a = 1 - Math.exp(-k * dt);
+    return cur + (target - cur) * a;
+  }
+
+  function lerp(a, b, t) {
+    return a + (b - a) * clamp01(t);
+  }
+
   function paintSegs(nodes, v, mode, cacheKey) {
-    const lit = Math.round(clamp01(v) * SEGS);
-    const key = mode + ":" + lit;
+    // fractional light for smoother fill (partial last segment via opacity)
+    const f = clamp01(v) * SEGS;
+    const lit = Math.floor(f);
+    const frac = f - lit;
+    const key = mode + ":" + lit + ":" + Math.round(frac * 4);
     if (state[cacheKey] === key) return;
     state[cacheKey] = key;
     for (let i = 0; i < SEGS; i++) {
       const n = nodes[i];
       let cls = "seg";
+      let opacity = "";
       if (i < lit) {
         cls += " on";
         if (mode === "warn") {
           cls += i > SEGS * 0.7 ? " warn-peak" : " warn";
         } else if (i > SEGS * 0.85) {
           cls += " peak";
-        } else if (i > SEGS * 0.5) {
+        } else if (i > SEGS * 0.5 || mode === "hot") {
           cls += " hot";
         }
+      } else if (i === lit && frac > 0.08) {
+        cls += " on partial";
+        if (mode === "warn") cls += " warn";
+        else if (mode === "hot" || i > SEGS * 0.5) cls += " hot";
+        opacity = String(0.2 + frac * 0.8);
       }
       if (n.className !== cls) n.className = cls;
+      if (n.style.opacity !== opacity) n.style.opacity = opacity;
     }
   }
 
@@ -270,60 +292,94 @@
     c.fillRect(0, 0, w, h);
   }
 
+  // Orb reacts to AI downlink only. Mic/mute is chrome (meters + label), not the ring.
+  const AI_THRESH = 0.12; // ignore noise floor under this (0–1 after level())
+
+  function aiEnergy(dn) {
+    const v = clamp01(dn);
+    if (v <= AI_THRESH) return 0;
+    // compress hard — speech is on/soft, not a strobe meter
+    return Math.pow((v - AI_THRESH) / (1 - AI_THRESH), 0.9);
+  }
+
   function paintOrb(dn, up, live, muted, injecting) {
-    // Rich idle dial (the good one). Speech = same dial + soft tick/core only
-    // — no wild polar curves or spark dots.
+    // Calm dial: idle motion stays; AI only adds a subtle global pulse.
+    // `up` kept for API parity — never mixed into orb energy.
+    void up;
+    void injecting;
     const { w, h } = sizeOrb();
     const c = orbCtx;
     const cx = w / 2;
     const cy = h / 2;
     const t = (performance.now() - state.t0) / 1000;
-    const energy = live ? Math.max(dn, up * 0.35) : 0;
-    const speaking = live && dn > 0.1 && !muted;
+    const mx = state.mix;
+    const liveM = mx.live;
+    const muteM = mx.muted;
+    const speakM = mx.speak;
+    const energy = liveM > 0.05 ? aiEnergy(dn) * liveM : 0;
+    // heavily smoothed speak amount (0..1) — no frame-to-frame thrash
+    const speakSoft = speakM * Math.min(1, 0.35 + energy * 0.25);
     const idlePulse = 0.12 + 0.08 * Math.sin(t * 0.9);
     const breath = 0.5 + 0.5 * Math.sin(t * 0.85);
-    // idle spin locked; speech barely accelerates
-    const spin = t * (0.18 + (speaking ? Math.min(0.12, energy * 0.25) : 0));
+    // spin barely accelerates when she talks
+    const spin = t * (0.18 + speakSoft * 0.02);
     const m = Math.min(w, h);
-    const drive = speaking ? Math.min(0.35, energy * 0.5) : idlePulse;
+    // drive stays near idle; speech nudges glow/radius only
+    const drive = idlePulse + speakSoft * 0.04;
+    // subtle scale pulse (~1–2.5%) — not a bounce
+    const pulse =
+      1 +
+      speakSoft * (0.012 + 0.014 * Math.sin(t * 2.4) + energy * 0.008);
 
     c.clearRect(0, 0, w, h);
-    paintCosmos(c, w, h, t, live, speaking ? energy * 0.35 : 0, muted);
+    // cosmos bloom stays tiny even while speaking; mute wash eases in
+    paintCosmos(
+      c,
+      w,
+      h,
+      t,
+      liveM > 0.2,
+      speakSoft * (0.04 + 0.05 * speakSoft),
+      muteM > 0.15
+    );
 
-    const R = m * 0.36;
+    const R = m * 0.36 * pulse;
 
-    // event-horizon glow
+    // event-horizon glow — soft; no flash
     const halo = c.createRadialGradient(cx, cy, R * 0.12, cx, cy, R * 1.55);
-    if (muted && live) {
-      halo.addColorStop(0, "rgba(255,122,23,0.09)");
-      halo.addColorStop(0.55, "rgba(255,122,23,0.02)");
-      halo.addColorStop(1, "rgba(0,0,0,0)");
-    } else {
-      halo.addColorStop(0, `rgba(255,255,255,${0.04 + drive * 0.06})`);
-      halo.addColorStop(0.5, `rgba(255,255,255,${0.015 + drive * 0.02})`);
-      halo.addColorStop(1, "rgba(0,0,0,0)");
-    }
+    halo.addColorStop(0, `rgba(255,255,255,${0.035 + drive * 0.03 + speakSoft * 0.02})`);
+    halo.addColorStop(0.5, `rgba(255,255,255,${0.012 + drive * 0.015})`);
+    halo.addColorStop(1, "rgba(0,0,0,0)");
     c.fillStyle = halo;
     c.beginPath();
     c.arc(cx, cy, R * 1.55, 0, Math.PI * 2);
     c.fill();
+    // mute wash crossfades with mix (does not freeze pulse)
+    if (muteM > 0.02) {
+      const muteHalo = c.createRadialGradient(cx, cy, R * 0.1, cx, cy, R * 1.2);
+      muteHalo.addColorStop(0, `rgba(255,122,23,${0.055 * muteM * (1 - speakSoft * 0.5)})`);
+      muteHalo.addColorStop(1, "rgba(0,0,0,0)");
+      c.fillStyle = muteHalo;
+      c.beginPath();
+      c.arc(cx, cy, R * 1.2, 0, Math.PI * 2);
+      c.fill();
+    }
 
-    // layered concentric rings — same for idle + speech
+    // concentric rings — same character idle or speaking
     const ringRs = [0.28, 0.42, 0.56, 0.72, 0.88, 1.0];
     for (let i = 0; i < ringRs.length; i++) {
       const rr = R * ringRs[i] * (1 + breath * 0.008 * (i % 2 === 0 ? 1 : -1));
       c.beginPath();
       c.arc(cx, cy, rr, 0, Math.PI * 2);
-      c.strokeStyle = `rgba(255,255,255,${0.05 + i * 0.022 + drive * 0.03})`;
+      c.strokeStyle = `rgba(255,255,255,${0.05 + i * 0.022 + drive * 0.02})`;
       c.lineWidth = Math.max(1, m * (0.0018 + (i === ringRs.length - 1 ? 0.001 : 0)));
       c.stroke();
     }
 
-    // dual tick fields — organic idle always; speech adds a little length
+    // dual tick fields — organic idle only; speech does NOT thrash tick lengths
     function paintTicks(count, rBase, lenScale, spinMul, alphaBase) {
       for (let i = 0; i < count; i++) {
         const a = (i / count) * Math.PI * 2 - Math.PI / 2 + spin * spinMul;
-        const hi = state.histDn[i % state.histDn.length] || 0;
         const organic =
           0.35 +
           0.65 *
@@ -331,10 +387,7 @@
               0.5 *
                 Math.sin(i * 0.55 + t * 0.7) *
                 Math.cos(i * 0.21 - t * 0.4));
-        const speechBit = speaking
-          ? Math.min(0.35, (hi * 0.5 + energy * 0.2) * 0.7)
-          : 0;
-        const mix = clamp01(organic * idlePulse * 2.2 + organic * 0.15 + speechBit);
+        const mix = clamp01(organic * idlePulse * 2.2 + organic * 0.15);
         const major = i % 4 === 0;
         const tickLen = R * lenScale * (0.55 + mix * 0.9 + (major ? 0.15 : 0));
         const r0 = R * rBase;
@@ -342,13 +395,9 @@
         c.beginPath();
         c.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
         c.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
-        const alpha = Math.min(0.85, alphaBase + mix * 0.5 + (major ? 0.08 : 0));
-        if (muted && live) {
-          c.strokeStyle = `rgba(255,122,23,${0.18 + mix * 0.4})`;
-        } else {
-          c.strokeStyle = `rgba(255,255,255,${alpha})`;
-        }
-        c.lineWidth = Math.max(1, m * 0.0028 * (1 + mix * 0.5 + (major ? 0.25 : 0)));
+        const alpha = Math.min(0.75, alphaBase + mix * 0.45 + (major ? 0.06 : 0));
+        c.strokeStyle = `rgba(255,255,255,${alpha})`;
+        c.lineWidth = Math.max(1, m * 0.0028 * (1 + mix * 0.45 + (major ? 0.2 : 0)));
         c.lineCap = "round";
         c.stroke();
       }
@@ -356,28 +405,24 @@
     paintTicks(64, 0.9, 0.2, 0.08, 0.12);
     paintTicks(48, 0.62, 0.1, -0.05, 0.08);
 
-    // calm near-circle polar — idle ripple only; speech barely bumps amp
+    // calm near-circle polar — no histDn jagged contour while speaking
     const n = 96;
     c.beginPath();
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 - Math.PI / 2 + spin * 0.12;
-      const v = state.histDn[i % state.histDn.length] || 0;
       const idleR = 0.04 + 0.05 * Math.sin(i * 0.35 + t * 1.1);
-      const speechR = speaking ? Math.min(0.05, v * 0.08) : 0;
-      const rr = R * (0.78 + idleR * 0.06 + speechR);
+      const rr = R * (0.78 + idleR * 0.06);
       const x = cx + Math.cos(a) * rr;
       const y = cy + Math.sin(a) * rr;
       if (i === 0) c.moveTo(x, y);
       else c.lineTo(x, y);
     }
     c.closePath();
-    c.strokeStyle = speaking
-      ? `rgba(255,255,255,${0.14 + Math.min(0.12, dn * 0.2)})`
-      : "rgba(255,255,255,0.14)";
+    c.strokeStyle = "rgba(255,255,255,0.14)";
     c.lineWidth = Math.max(1, m * 0.0035);
     c.stroke();
 
-    // second quiet ring (idle character)
+    // second quiet ring
     c.beginPath();
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 - Math.PI / 2 - spin * 0.1;
@@ -393,14 +438,14 @@
     c.lineWidth = Math.max(1, m * 0.0025);
     c.stroke();
 
-    // triple orbiting arcs — full idle energy
+    // orbiting arcs — idle pace; speech does not widen sweeps
     for (let o = 0; o < 3; o++) {
       const base = R * (0.34 + o * 0.14);
-      const sweep = 0.65 + drive * 0.9 + o * 0.18 + breath * 0.08;
+      const sweep = 0.65 + idlePulse * 0.75 + o * 0.18 + breath * 0.08;
       const ang = spin * (1.15 + o * 0.4) + o * 2.05;
       c.beginPath();
       c.arc(cx, cy, base, ang, ang + sweep);
-      c.strokeStyle = `rgba(255,255,255,${0.09 + drive * 0.18 - o * 0.015})`;
+      c.strokeStyle = `rgba(255,255,255,${0.09 + idlePulse * 0.12 - o * 0.015})`;
       c.lineWidth = Math.max(1.2, m * (0.0045 - o * 0.0006));
       c.lineCap = "round";
       c.stroke();
@@ -412,26 +457,19 @@
         ang + Math.PI * 0.9,
         ang + Math.PI * 0.9 + sweep * 0.45
       );
-      c.strokeStyle = `rgba(255,255,255,${0.04 + drive * 0.06})`;
+      c.strokeStyle = `rgba(255,255,255,${0.04 + idlePulse * 0.04})`;
       c.lineWidth = Math.max(1, m * 0.002);
       c.lineCap = "round";
       c.stroke();
     }
 
-    // core
-    const coreR = R * (0.18 + (speaking ? Math.min(0.05, energy * 0.07) : 0.01) + breath * 0.02);
+    // core — gentle brightness when speaking; nucleus eases white↔sunset on mute
+    const coreR = R * (0.18 + 0.01 + breath * 0.02 + speakSoft * 0.012);
     const coreG = c.createRadialGradient(cx, cy, 0, cx, cy, coreR * 1.7);
-    if (!live) {
-      coreG.addColorStop(0, "#1a1a20");
-      coreG.addColorStop(0.55, "#101014");
-      coreG.addColorStop(1, "#0a0a0a");
-    } else if (muted) {
-      coreG.addColorStop(0, "#2c1810");
-      coreG.addColorStop(1, "#0a0a0a");
-    } else {
-      coreG.addColorStop(0, speaking ? "#222228" : "#1a1a20");
-      coreG.addColorStop(1, "#0a0a0a");
-    }
+    const coreTop = liveM < 0.15 ? "#1a1a20" : speakSoft > 0.2 ? "#1e1e24" : "#1a1a20";
+    coreG.addColorStop(0, coreTop);
+    if (liveM < 0.15) coreG.addColorStop(0.55, "#101014");
+    coreG.addColorStop(1, "#0a0a0a");
     c.beginPath();
     c.arc(cx, cy, coreR * 1.55, 0, Math.PI * 2);
     c.fillStyle = coreG;
@@ -439,11 +477,7 @@
 
     c.beginPath();
     c.arc(cx, cy, coreR, 0, Math.PI * 2);
-    c.strokeStyle = live
-      ? muted
-        ? "rgba(255,122,23,0.5)"
-        : `rgba(255,255,255,${0.2 + (speaking ? Math.min(0.2, dn * 0.25) : 0)})`
-      : "rgba(255,255,255,0.16)";
+    c.strokeStyle = `rgba(255,255,255,${lerp(0.16, 0.2 + speakSoft * 0.06, liveM)})`;
     c.lineWidth = Math.max(1.2, m * 0.004);
     c.stroke();
 
@@ -453,30 +487,36 @@
     c.lineWidth = Math.max(1, m * 0.002);
     c.stroke();
 
-    const nr = Math.max(2.5, coreR * (0.26 + (speaking ? Math.min(0.1, energy * 0.1) : 0)));
+    const nr = Math.max(2.5, coreR * (0.26 + speakSoft * 0.03));
+    // blend nucleus color by mute mix (smooth mute transition)
+    const nw = Math.round(lerp(255, 255, muteM));
+    const ng = Math.round(lerp(255, 122, muteM));
+    const nb = Math.round(lerp(255, 23, muteM));
+    const idleGrey = 154;
+    const fr = Math.round(lerp(idleGrey, nw, liveM));
+    const fg = Math.round(lerp(idleGrey, ng, liveM));
+    const fb = Math.round(lerp(164, nb, liveM));
     c.beginPath();
     c.arc(cx, cy, nr, 0, Math.PI * 2);
-    c.fillStyle = muted && live ? "#ff7a17" : live ? "#ffffff" : "#9a9ea4";
-    c.globalAlpha = live ? 0.92 : 0.62;
+    c.fillStyle = `rgb(${fr},${fg},${fb})`;
+    c.globalAlpha = lerp(0.62, 0.88 + speakSoft * 0.06, liveM);
     c.fill();
     c.globalAlpha = 1;
 
-    // idle-only glints (2) — never the speech spark storm
-    if (!speaking) {
-      for (let s = 0; s < 2; s++) {
-        const a = spin * 1.9 + (s / 2) * Math.PI * 2;
-        const rr = R * (0.7 + 0.08 * Math.sin(t * 2 + s));
-        c.beginPath();
-        c.arc(
-          cx + Math.cos(a) * rr,
-          cy + Math.sin(a) * rr,
-          Math.max(1, m * 0.0028),
-          0,
-          Math.PI * 2
-        );
-        c.fillStyle = "rgba(255,255,255,0.22)";
-        c.fill();
-      }
+    // quiet glints always — no speech spark storm
+    for (let s = 0; s < 2; s++) {
+      const a = spin * 1.9 + (s / 2) * Math.PI * 2;
+      const rr = R * (0.7 + 0.08 * Math.sin(t * 2 + s));
+      c.beginPath();
+      c.arc(
+        cx + Math.cos(a) * rr,
+        cy + Math.sin(a) * rr,
+        Math.max(1, m * 0.0028),
+        0,
+        Math.PI * 2
+      );
+      c.fillStyle = `rgba(255,255,255,${lerp(0.22, 0.14, speakSoft)})`;
+      c.fill();
     }
   }
 
@@ -519,14 +559,20 @@
       c.stroke();
     }
 
+    const liveA = 0.12 + state.mix.live * 0.78;
+    const muteA = state.mix.muted;
+    const upR = Math.round(lerp(125, 255, muteA));
+    const upG = Math.round(lerp(129, 122, muteA));
+    const upB = Math.round(lerp(135, 23, muteA));
+    const upA = 0.55 + muteA * 0.1;
     strokeHist(
       state.histDn,
-      state.live ? "rgba(218,219,223,0.9)" : "rgba(255,255,255,0.12)",
+      `rgba(218,219,223,${liveA})`,
       1
     );
     strokeHist(
       state.histUp,
-      state.muted ? "rgba(255,122,23,0.65)" : "rgba(125,129,135,0.7)",
+      `rgba(${upR},${upG},${upB},${upA})`,
       0.75
     );
   }
@@ -535,8 +581,18 @@
     const key = text + "|" + (cls || "");
     if (state.lastOrb === key) return;
     state.lastOrb = key;
-    el.orbLabel.textContent = text;
-    el.orbLabel.className = "orb-label" + (cls ? " " + cls : "");
+    const node = el.orbLabel;
+    if (!node) return;
+    // crossfade label text
+    node.classList.add("orb-label-fade");
+    window.setTimeout(() => {
+      node.textContent = text;
+      node.className =
+        "orb-label" + (cls ? " " + cls : "") + " orb-label-fade";
+      requestAnimationFrame(() => {
+        node.classList.remove("orb-label-fade");
+      });
+    }, 90);
   }
 
   function setText(node, value) {
@@ -548,13 +604,13 @@
   }
 
   function speakingHysteresis(want) {
-    // Long latch — orb energy only; chrome no longer toggles on this
+    // Long latch — soft speak mix; avoids label/orb thrash
     const now = performance.now();
     if (want) {
       state.speakLatch = now;
       return true;
     }
-    if (state.speaking && now - state.speakLatch < 700) return true;
+    if (state.speaking && now - state.speakLatch < 1100) return true;
     return false;
   }
 
@@ -601,12 +657,12 @@
 
     const upRaw = level(m.uplink_peak);
     const dnRaw = level(m.downlink_peak);
-    // Fast attack / slow release so bars track speech without blinking
-    state.up = smoothToward(state.up, upRaw, 0.55, 0.18);
-    state.dn = smoothToward(state.dn, dnRaw, 0.55, 0.18);
+    // Softer envelopes — less blink, smoother bars
+    state.up = smoothToward(state.up, upRaw, 0.32, 0.12);
+    state.dn = smoothToward(state.dn, dnRaw, 0.32, 0.12);
     if (!live) {
-      state.up *= 0.88;
-      state.dn *= 0.88;
+      state.up *= 0.92;
+      state.dn *= 0.92;
     }
 
     state.histUp.push(state.up);
@@ -619,13 +675,24 @@
     state.muted = muted;
     state.injecting = injecting;
 
-    const wantSpeak = live && state.dn > 0.08;
+    // AI-only speaking latch (mute is mic uplink only — does not suppress this)
+    const wantSpeak = live && state.dn > AI_THRESH;
     const speaking = speakingHysteresis(wantSpeak);
     state.speaking = speaking;
-    // body.speaking only drives subtle orb-adjacent cues — not chrome hide/show
-    if (document.body.classList.contains("speaking") !== speaking) {
-      document.body.classList.toggle("speaking", speaking);
-    }
+
+    // targets for continuous mixes (frame loop eases these)
+    state.tgt.live = live ? 1 : 0;
+    state.tgt.muted = live && muted ? 1 : 0;
+    state.tgt.speak = live && speaking ? 1 : 0;
+    state.tgt.inject = live && injecting ? 1 : 0;
+    state.tgt.you =
+      live && !muted && state.up > 0.1 && !speaking ? 1 : 0;
+
+    // body classes for CSS transitions (chip, mute btn, meta)
+    document.body.classList.toggle("live", live);
+    document.body.classList.toggle("speaking", speaking);
+    document.body.classList.toggle("muted", live && muted);
+    document.body.classList.toggle("injecting", live && injecting);
 
     if (state.lastStatus !== status) {
       state.lastStatus = status;
@@ -636,13 +703,13 @@
       );
     }
 
-    // Stable labels — no blank-on-speak thrash
-    if (live && muted) {
-      setOrbLabel("muted", "warn");
-    } else if (live && injecting) {
+    // AI label wins over mute — ring is her voice; mute is my mic (meters show it)
+    if (live && injecting) {
       setOrbLabel("inject", "hot");
     } else if (live && speaking) {
       setOrbLabel("ai", "hot");
+    } else if (live && muted) {
+      setOrbLabel("muted", "warn");
     } else if (live && state.up > 0.1) {
       setOrbLabel("you");
     } else if (live) {
@@ -658,11 +725,21 @@
       state.lastMuteLabel = muteLabel;
       setText(el.btnMute, muteLabel);
     }
+    if (el.btnMute) {
+      el.btnMute.classList.toggle("pill-muted", live && muted);
+      el.btnMute.setAttribute("aria-pressed", muted ? "true" : "false");
+    }
     setText(el.upPct, Math.round(state.up * 100) + "%");
     setText(el.dnPct, Math.round(state.dn * 100) + "%");
 
-    paintSegs(upSegs, state.up, muted ? "warn" : "normal", "lastSegUp");
-    paintSegs(dnSegs, state.dn, "normal", "lastSegDn");
+    // segs: warn mode follows muted mix > half so color eases with mute
+    paintSegs(
+      upSegs,
+      state.up,
+      state.mix.muted > 0.45 ? "warn" : "normal",
+      "lastSegUp"
+    );
+    paintSegs(dnSegs, state.dn, speaking ? "hot" : "normal", "lastSegDn");
 
     // Only write tele when payload has real session fields — never flash "—"
     const hasSession = !!(m.session_name || m.profile || m.voice);
@@ -734,8 +811,21 @@
   }
 
   async function muteToggle() {
-    if (state.muted) await bridgeCall("unmute");
-    else await bridgeCall("mute");
+    // Optimistic mix so mute chrome eases immediately
+    const next = !state.muted;
+    state.muted = next;
+    state.tgt.muted = state.live && next ? 1 : 0;
+    document.body.classList.toggle("muted", state.live && next);
+    if (el.btnMute) {
+      el.btnMute.classList.toggle("pill-muted", state.live && next);
+      setText(el.btnMute, next ? "Unmute" : "Mute");
+      state.lastMuteLabel = next ? "Unmute" : "Mute";
+    }
+    if (next) setOrbLabel("muted", "warn");
+    try {
+      if (next) await bridgeCall("mute");
+      else await bridgeCall("unmute");
+    } catch (_) {}
   }
 
   async function stopCall() {
@@ -767,10 +857,29 @@
     paintWave();
   });
 
-  // Continuous paint (smooth dial). Meters only update levels.
-  function frame() {
+  // Continuous paint: ease mode mixes then draw (mute / speak / live / inject)
+  let lastFrameT = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, Math.max(0.008, (now - lastFrameT) / 1000));
+    lastFrameT = now;
+    // slightly different rates so layers don't snap in lockstep
+    state.mix.live = easeMix(state.mix.live, state.tgt.live, 5.2, dt);
+    state.mix.muted = easeMix(state.mix.muted, state.tgt.muted, 4.0, dt);
+    state.mix.speak = easeMix(state.mix.speak, state.tgt.speak, 3.4, dt);
+    state.mix.inject = easeMix(state.mix.inject, state.tgt.inject, 4.2, dt);
+    state.mix.you = easeMix(state.mix.you, state.tgt.you, 3.8, dt);
+
     paintOrb(state.dn, state.up, state.live, state.muted, state.injecting);
     paintWave();
+    // segs warn blend tracks mute mix continuously
+    if (state.live) {
+      paintSegs(
+        upSegs,
+        state.up,
+        state.mix.muted > 0.45 ? "warn" : "normal",
+        "lastSegUp"
+      );
+    }
     requestAnimationFrame(frame);
   }
 

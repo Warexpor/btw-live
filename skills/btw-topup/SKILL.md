@@ -5,17 +5,21 @@ description: Mid-call curated context top-up for /btw-vc. Use for /btw-topup whe
 
 # /btw-topup
 
-Feed **short curated facts** into the active Live voice session. Not the whole Grok chat.
+Feed **what's new** into the active Live voice session as a **short spoken uplink inject** (SAPI TTS).
+
+Not the whole Grok chat. Not a second full session brief.
 
 ## Flow
 
-1. Build a tight snip (goal, file, error, decision) — prefer ≤500–900 chars.
-2. Call `btw_push_context` with that snip (service **appends** by default).
-3. If Live is running: runtime injects a plain-text datachannel entry (not TTS unless `BTW_AUDIO_TOPUP=1`).
-4. Confirm in one line: topped up / chars / live_push_queued.
+1. Curate a tight snip of **only new facts** since last inject (goal change, file, error, decision, test result). Target **≤280–400 chars spoken** (pack can be longer).
+2. Call `btw_push_context` with that snip (service **appends** pack; Live speaks **delta only**).
+3. Runtime: uplink TTS of the delta (product path). DC plain if channel still open is best-effort only.
+4. Confirm in one line: topped up / delta_chars / live_push_queued / inject.
 
 ## Rules
 
-- Curated only. No dumps, secrets, cookies, tokens.
+- **One spoken top-up** per call. No multi-frame dump of session history.
+- Brief but complete picture of the *delta* (agent already has boot brief + prior top-ups).
+- Curated only. No secrets, cookies, tokens, giant logs.
 - Do not restart Live for a top-up.
 - You implement code; voice only advises.

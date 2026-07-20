@@ -25,10 +25,16 @@ FRAME_SAMPLES = 960  # 20 ms @ 48 kHz
 RING_SECONDS = 3
 
 # Hard safety: never let peaks hit full scale (ear protection)
-SPEAKER_GAIN = 0.25
-SPEAKER_PEAK_LIMIT = 0.35
-# Don't play until this much is buffered (avoids startup crack / garbage)
-SPEAKER_PREROLL = int(SAMPLE_RATE * 0.08)  # 80 ms
+SPEAKER_GAIN = 0.28
+SPEAKER_PEAK_LIMIT = 0.40
+# Don't play until this much is buffered (startup only; keep short = less lag)
+SPEAKER_PREROLL = int(SAMPLE_RATE * 0.06)  # 60 ms
+# Crossfade only on real discontinuities (inject↔mic), not every speech frame
+DECLICK_SAMPLES = 64
+# Only treat near-digital jumps as decode glitches (speech legitimately jumps more)
+CLICK_JUMP = 0.85
+# Cap ring so late packets don't pile into multi-second lag
+SPEAKER_RING_MAX = int(SAMPLE_RATE * 0.35)  # ~350 ms max backlog
 
 
 class _FloatRing:
@@ -82,10 +88,26 @@ class _FloatRing:
             self._size -= take
         return out
 
+    def drop_to(self, max_keep: int) -> int:
+        """Discard oldest samples so size <= max_keep. Returns count dropped."""
+        max_keep = max(0, int(max_keep))
+        with self._lock:
+            if self._size <= max_keep:
+                return 0
+            drop = self._size - max_keep
+            self._r = (self._r + drop) % self._cap
+            self._size -= drop
+            return drop
+
     @property
     def size(self) -> int:
         with self._lock:
             return self._size
+
+
+# Keep only ~this much mic backlog (ms of "now"). Larger backlog = delayed
+# utterance dump after you stop talking — kills barge-in vs real ChatGPT Live.
+MIC_LIVE_EDGE_SAMPLES = int(SAMPLE_RATE * 0.06)  # 60 ms
 
 
 def _to_mono_float(arr: np.ndarray) -> np.ndarray:
@@ -154,16 +176,76 @@ def _frame_level(samples: np.ndarray) -> float:
 
 
 def _limit(mono: np.ndarray, gain: float = SPEAKER_GAIN, peak: float = SPEAKER_PEAK_LIMIT) -> np.ndarray:
+    """Gain + hard peak limit. No tanh — soft clip was warping speech into grit."""
     x = mono * gain
-    # soft tanh-ish limit then hard clip
-    x = np.tanh(x * 1.2) / np.tanh(1.2)
     return np.clip(x, -peak, peak).astype(np.float32)
 
 
+def _declick_join(prev_last: float, mono: np.ndarray, n: int = DECLICK_SAMPLES) -> np.ndarray:
+    """Blend only on large discontinuities (e.g. inject↔mic). Leave speech alone."""
+    mono = np.asarray(mono, dtype=np.float32).reshape(-1)
+    if mono.size == 0:
+        return mono
+    jump = float(mono[0]) - float(prev_last)
+    # High bar: normal phonemes must not trigger this every 20ms frame
+    if abs(jump) < 0.45:
+        return mono
+    n = int(min(max(4, n), mono.size))
+    out = mono.copy()
+    fade = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    held = np.full(n, float(prev_last), dtype=np.float32)
+    out[:n] = held * (1.0 - fade) + out[:n] * fade
+    return out
+
+
+def _soften_intra_clicks(mono: np.ndarray, jump: float = CLICK_JUMP) -> np.ndarray:
+    """Kill rare one-sample digital spikes only. Low thresholds scratch speech."""
+    mono = np.asarray(mono, dtype=np.float32).reshape(-1)
+    if mono.size < 3:
+        return mono
+    # Fast path: no extreme sample → leave untouched (common case)
+    peak = float(np.max(np.abs(mono)))
+    if peak < 0.92:
+        return mono
+    out = mono
+    d = np.abs(np.diff(out))
+    bad = np.where(d > jump)[0]
+    if bad.size == 0:
+        return mono
+    out = mono.copy()
+    for i in bad:
+        i1 = i + 1
+        if i1 >= out.size:
+            continue
+        # single-sample spike: neighbors agree
+        if i1 + 1 < out.size and abs(out[i1 + 1] - out[i]) < jump * 0.4:
+            out[i1] = 0.5 * (out[i] + out[i1 + 1])
+        elif abs(out[i1]) > 0.9:
+            out[i1] = out[i]
+    return out
+
+
+def _fade_from_hold(hold: float, n: int, decay: float = 0.985) -> np.ndarray:
+    """Short underrun fill — decay fast so we don't invent humming scratch."""
+    if n <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if abs(hold) < 1e-4:
+        return np.zeros(n, dtype=np.float32)
+    t = np.arange(n, dtype=np.float32)
+    return (float(hold) * (decay ** t)).astype(np.float32)
+
+
 class MicrophoneTrack(MediaStreamTrack):
+    """Capture mic continuously. Prefer live edge over delayed backlog.
+
+    When used under InjectableUplinkTrack, set paced=False so only the
+    outer track sleeps for 20 ms frames. Double pacing was causing catch-up
+    dumps: whole utterances arrive after you stop → no barge-in.
+    """
+
     kind = "audio"
 
-    def __init__(self, device: Optional[int | str] = None):
+    def __init__(self, device: Optional[int | str] = None, *, paced: bool = True):
         super().__init__()
         if sd is None:
             raise RuntimeError("sounddevice not installed")
@@ -174,6 +256,8 @@ class MicrophoneTrack(MediaStreamTrack):
         self._pending = np.zeros(0, dtype=np.float32)
         self._in_rate = SAMPLE_RATE
         self.muted = False
+        # Outer InjectableUplinkTrack owns WebRTC frame clock when False.
+        self._paced = bool(paced)
 
         def callback(indata, frames, time_info, status):  # noqa: ARG001
             if self.muted:
@@ -201,18 +285,22 @@ class MicrophoneTrack(MediaStreamTrack):
             dtype="float32",
             blocksize=0,
             device=device,
-            latency="high",
+            latency="low",
             callback=callback,
         )
         self._stream.start()
 
     def resync_clock(self) -> None:
-        """Reset pacing after a long inject so we don't dump/starve frames."""
+        """Snap to live edge after inject / stall — no delayed dump."""
         self._started = time.monotonic()
         self._pts = 0
         self._pending = np.zeros(0, dtype=np.float32)
-        # drop stale buffered audio; take live from now
         self._ring = _FloatRing(SAMPLE_RATE * RING_SECONDS)
+
+    def discard_buffered(self) -> None:
+        """Drop ring + pending (call every inject frame so mic stays live-edge)."""
+        self._pending = np.zeros(0, dtype=np.float32)
+        self._ring.drop_to(0)
 
     def _resample_to_48k(self, mono: np.ndarray, src_rate: int) -> np.ndarray:
         if src_rate == SAMPLE_RATE or mono.size == 0:
@@ -225,45 +313,64 @@ class MicrophoneTrack(MediaStreamTrack):
         x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
         return np.interp(x_new, x_old, mono).astype(np.float32)
 
-    async def recv(self) -> AudioFrame:
-        if self.readyState != "live":
-            raise MediaStreamError
+    def _need_in(self) -> int:
+        if self._in_rate == SAMPLE_RATE:
+            return FRAME_SAMPLES
+        return int(round(FRAME_SAMPLES * self._in_rate / SAMPLE_RATE))
 
-        need_in = (
-            FRAME_SAMPLES
-            if self._in_rate == SAMPLE_RATE
-            else int(round(FRAME_SAMPLES * self._in_rate / SAMPLE_RATE))
+    async def _pull_live_frame(self) -> np.ndarray:
+        """One frame of *current* mic audio; drop backlog older than live edge."""
+        need_in = self._need_in()
+        # Keep only ~60ms + one frame of "now". Shipping older backlog makes
+        # Wingman hear your full sentence after you already stopped.
+        edge_in = need_in + int(
+            round(MIC_LIVE_EDGE_SAMPLES * self._in_rate / SAMPLE_RATE)
         )
-
-        target = self._started + (self._pts / SAMPLE_RATE)
-        delay = target - time.monotonic()
-        if delay > 0.001:
-            await asyncio.sleep(delay)
+        pending_n = int(self._pending.size)
+        self._ring.drop_to(max(0, edge_in - pending_n))
 
         chunks = [self._pending]
-        got = int(self._pending.size)
+        got = pending_n
+        # Short waits only when under-running (startup / glitch). Max ~16ms.
         tries = 0
-        while got < need_in and tries < 40:
+        max_tries = 8 if not self._paced else 20
+        while got < need_in and tries < max_tries:
             chunk = self._ring.read(need_in - got)
             chunks.append(chunk)
             got += chunk.size
             if got < need_in:
-                await asyncio.sleep(0.004)
+                await asyncio.sleep(0.002)
             tries += 1
 
         raw = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
         if raw.size < need_in:
             raw = np.pad(raw, (0, need_in - raw.size))
-        self._pending = raw[need_in:] if raw.size > need_in else np.zeros(0, dtype=np.float32)
+        self._pending = (
+            raw[need_in:] if raw.size > need_in else np.zeros(0, dtype=np.float32)
+        )
         if self.muted:
-            samples = np.zeros(FRAME_SAMPLES, dtype=np.float32)
+            return np.zeros(FRAME_SAMPLES, dtype=np.float32)
+        samples = self._resample_to_48k(raw[:need_in], self._in_rate)
+        if samples.size < FRAME_SAMPLES:
+            samples = np.pad(samples, (0, FRAME_SAMPLES - samples.size))
         else:
-            samples = self._resample_to_48k(raw[:need_in], self._in_rate)
-            if samples.size < FRAME_SAMPLES:
-                samples = np.pad(samples, (0, FRAME_SAMPLES - samples.size))
-            else:
-                samples = samples[:FRAME_SAMPLES]
-            samples = np.clip(samples * 0.9, -1.0, 1.0)
+            samples = samples[:FRAME_SAMPLES]
+        return np.clip(samples * 0.9, -1.0, 1.0).astype(np.float32)
+
+    async def recv(self) -> AudioFrame:
+        if self.readyState != "live":
+            raise MediaStreamError
+
+        if self._paced:
+            target = self._started + (self._pts / SAMPLE_RATE)
+            delay = target - time.monotonic()
+            if delay > 0.001:
+                await asyncio.sleep(delay)
+            # >40ms late → jump to live edge instead of dumping backlog
+            elif delay < -0.040:
+                self.resync_clock()
+
+        samples = await self._pull_live_frame()
 
         pcm = (samples * 32767.0).astype(np.int16)
         frame = AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
@@ -292,6 +399,13 @@ class MicrophoneTrack(MediaStreamTrack):
 
 
 class SpeakerPlayer:
+    """Remote audio → speakers with underrun/glitch smoothing.
+
+    Cracks often come from (a) ring underruns → hard zeros, (b) decode spikes,
+    (c) discontinuous frame joins. We do not invent missing audio from OpenAI,
+    but we *do* declick edges and fade holds so our path does not make it worse.
+    """
+
     def __init__(self, device: Optional[int | str] = None, gain: float = SPEAKER_GAIN):
         if sd is None:
             raise RuntimeError("sounddevice not installed")
@@ -306,6 +420,10 @@ class SpeakerPlayer:
         self._env = _Envelope(release=0.91)
         self._last_audio_ts = 0.0
         self.last_peak = 0.0  # envelope level for visualizer (0..1)
+        # de-click state (callback + push path)
+        self._last_played = 0.0
+        self._last_written = 0.0
+        self._write_lock = threading.Lock()
 
     def sample_meter(self) -> float:
         """Envelope level; releases when no remote frames recently."""
@@ -329,14 +447,30 @@ class SpeakerPlayer:
         player = self
 
         def callback(outdata, frames, time_info, status):  # noqa: ARG001
-            if not player._ready or player._ring.size < SPEAKER_PREROLL // 4:
-                # preroll / not ready → silence (no noise)
-                outdata.fill(0)
-                if player._ring.size >= SPEAKER_PREROLL:
+            # Play path must stay cheap and clean — no per-block soften/smear.
+            have = player._ring.size
+            if not player._ready:
+                if have >= SPEAKER_PREROLL:
                     player._ready = True
-                return
-            mono = player._ring.read(frames)
-            mono = _limit(mono, gain=1.0, peak=SPEAKER_PEAK_LIMIT)  # already gained on write
+                else:
+                    outdata.fill(0)
+                    player._last_played = 0.0
+                    return
+
+            if have <= 0:
+                mono = _fade_from_hold(player._last_played, frames)
+                player._last_played = float(mono[-1]) if mono.size else 0.0
+            elif have < frames:
+                head = player._ring.read(have)
+                tail = np.zeros(frames - have, dtype=np.float32)
+                mono = np.concatenate([head, tail]) if head.size else tail
+                player._last_played = float(head[-1]) if head.size else 0.0
+            else:
+                mono = player._ring.read(frames)
+                player._last_played = float(mono[-1]) if mono.size else 0.0
+
+            # already limited on write — only hard-safety here
+            mono = np.clip(mono, -SPEAKER_PEAK_LIMIT, SPEAKER_PEAK_LIMIT)
             if ch == 1:
                 outdata[:, 0] = mono
             else:
@@ -351,7 +485,7 @@ class SpeakerPlayer:
             dtype="float32",
             blocksize=FRAME_SAMPLES,
             device=self._device,
-            latency="high",
+            latency="low",
             callback=callback,
         )
         self._stream.start()
@@ -374,17 +508,21 @@ class SpeakerPlayer:
             mono = _to_mono_float(arr)
             if mono.size == 0:
                 continue
-            # skip near-digital-full-scale garbage bursts (decode glitches)
             raw_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
             if raw_peak > 0.99 and self._frames_in < 5:
                 continue
-            # Meter from post-gain/limit energy ≈ what you actually hear
+            # Rare digital spikes only; do not re-process every speech frame
+            mono = _soften_intra_clicks(mono)
             limited = _limit(mono, gain=self._gain, peak=SPEAKER_PEAK_LIMIT)
-            # normalize so full SPEAKER_PEAK_LIMIT maps to ~1.0 on the bar
+            with self._write_lock:
+                if limited.size:
+                    self._last_written = float(limited[-1])
             heard = _frame_level(limited / max(SPEAKER_PEAK_LIMIT, 1e-6))
             self.last_peak = self._env.update(heard)
             self._last_audio_ts = time.monotonic()
             self._ring.write(limited)
+            # Drop oldest if network jitter filled a lag backlog
+            self._ring.drop_to(SPEAKER_RING_MAX)
             self._frames_in += 1
             if not self._ready and self._ring.size >= SPEAKER_PREROLL:
                 self._ready = True
@@ -393,6 +531,8 @@ class SpeakerPlayer:
         self._ready = False
         self.last_peak = 0.0
         self._last_audio_ts = 0.0
+        self._last_played = 0.0
+        self._last_written = 0.0
         self._env.reset()
         self._ring.clear()
         if self._stream is not None:
@@ -480,8 +620,8 @@ def _load_wav_mono_48k(wav_path: str | Path) -> np.ndarray:
     return np.clip(pcm, -1.0, 1.0).astype(np.float32)
 
 
-# Cap TTS inject so mic is not blocked for 20s of SAPI
-INJECT_MAX_SAMPLES = SAMPLE_RATE * 8  # 8s
+# Cap TTS inject — boot can run up to ~1 min of SAPI for a dense brief
+INJECT_MAX_SAMPLES = SAMPLE_RATE * 60  # 60s
 
 
 class InjectableUplinkTrack(MediaStreamTrack):
@@ -507,6 +647,7 @@ class InjectableUplinkTrack(MediaStreamTrack):
         self.last_peak = 0.0  # envelope level for visualizer (0..1)
         self.mic_frames = 0
         self.inject_frames = 0
+        self._last_sample = 0.0
 
     def set_muted(self, muted: bool) -> None:
         """Mute only the live mic base — injects still play."""
@@ -600,19 +741,35 @@ class InjectableUplinkTrack(MediaStreamTrack):
         if self.readyState != "live":
             raise MediaStreamError
 
+        # Sole WebRTC pacer (mic base uses paced=False). Cap catch-up so we
+        # never blast a backlog of speech after a stall.
         target = self._start + (self._pts / SAMPLE_RATE)
         delay = target - time.monotonic()
         if delay > 0.001:
             await asyncio.sleep(delay)
+        elif delay < -0.040:
+            # Jump timeline to now; mic live-edge drop handles samples.
+            self._start = time.monotonic()
+            self._pts = 0
+            if self._base is not None and hasattr(self._base, "resync_clock"):
+                try:
+                    self._base.resync_clock()
+                except Exception:
+                    pass
 
         source = "silence"
         if self.inject_queue_samples() > 0:
             samples = self._take_inject(FRAME_SAMPLES)
             source = "inject"
             self.inject_frames += 1
+            # Keep mic ring at live edge while inject owns uplink (no post-TTS dump)
+            if self._base is not None and hasattr(self._base, "discard_buffered"):
+                try:
+                    self._base.discard_buffered()
+                except Exception:
+                    pass
         elif self._base is not None and not self._muted_base:
             try:
-                # Realign base clock once so post-inject mic isn't stuck
                 if hasattr(self._base, "resync_clock"):
                     if self.inject_frames and self.mic_frames == 0:
                         self._base.resync_clock()
@@ -626,9 +783,13 @@ class InjectableUplinkTrack(MediaStreamTrack):
         else:
             samples = np.zeros(FRAME_SAMPLES, dtype=np.float32)
 
+        # Only blend inject↔mic edges (high threshold). No per-frame soften on speech.
+        samples = _declick_join(self._last_sample, samples)
+        if samples.size:
+            self._last_sample = float(samples[-1])
+
         self._source = source
         instant = _frame_level(samples)
-        # Always update envelope (incl. silence) so release tracks real audio
         self.last_peak = self._env.update(instant)
         self._frames += 1
         now = time.monotonic()
@@ -652,6 +813,7 @@ class InjectableUplinkTrack(MediaStreamTrack):
     def stop(self) -> None:
         self._env.reset()
         self.last_peak = 0.0
+        self._last_sample = 0.0
         if self._base is not None:
             try:
                 self._base.stop()

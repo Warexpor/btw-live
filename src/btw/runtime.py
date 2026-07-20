@@ -324,6 +324,26 @@ def start_foreground(
     speak = normalize_voice(voice) if voice else prof.voice
     ctx_path = data_dir() / "context.txt"
     context = ctx_path.read_text(encoding="utf-8") if ctx_path.is_file() else ""
+    resume_path = data_dir() / "resume_snip.txt"
+    resume_snip = (
+        resume_path.read_text(encoding="utf-8") if resume_path.is_file() else ""
+    )
+    conversation_id = ""
+    try:
+        from . import sessions_store as ss
+
+        conversation_id = (ss.get_active().conversation_id or "").strip()
+    except Exception:
+        conversation_id = ""
+    # last_prepare may have fresher hydrate from service.start
+    try:
+        prep_p = data_dir() / "last_prepare.json"
+        if prep_p.is_file():
+            prep = json.loads(prep_p.read_text(encoding="utf-8"))
+            if prep.get("conversation_id"):
+                conversation_id = str(prep["conversation_id"])
+    except Exception:
+        pass
 
     async def _run() -> dict[str, Any]:
         sess = LiveSession(
@@ -334,13 +354,17 @@ def start_foreground(
             session_name=session_name or st.session_name or "default",
             voice=speak,
             context=context,
+            conversation_id=conversation_id,
+            resume_snip=resume_snip,
         )
         try:
             stats = await sess.start()
             mark_live(st, sess.voice_session_id, len(instructions))
             st.notes = [
                 f"mint={stats.get('mint')} mic={stats.get('mic')} "
-                f"pc={stats.get('pc_state')}"
+                f"pc={stats.get('pc_state')} "
+                f"bind={stats.get('mint_bind')} "
+                f"cid={(conversation_id or '-')[:8]}"
             ]
             save_state(st)
             return await sess.run_until_stopped(seconds=seconds)

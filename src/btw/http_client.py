@@ -218,9 +218,138 @@ class ChatGPTClient:
                 + "; ".join(errors[-8:])
             ) from e
 
-    def mint_realtime(self, sdp_offer: str, session_payload: dict[str, Any]) -> str:
+    def _ensure_token(self) -> None:
         if not self.access_token:
             self.fetch_access_token()
+
+    def _get_text(self, url: str, *, bearer: bool = True) -> tuple[int, str, dict[str, str]]:
+        """GET url; return status, body text, response headers (lower-case keys)."""
+        self._ensure_token()
+        headers = self._headers(bearer=bearer)
+        imps = [self.impersonate] if self.impersonate else []
+        imps += [i for i in IMPERSONATE_CANDIDATES if i and i not in imps]
+        last_err = "no impersonate"
+        for imp in imps:
+            if not imp:
+                continue
+            try:
+                r = _cffi_get(url, headers, imp)
+                hdrs = {k.lower(): v for k, v in (r.headers or {}).items()}
+                return int(r.status_code), r.text or "", hdrs
+            except Exception as e:
+                last_err = f"{imp}:{e}"
+        try:
+            import requests
+
+            r = requests.get(url, headers=headers, timeout=45)
+            hdrs = {k.lower(): v for k, v in r.headers.items()}
+            return int(r.status_code), r.text or "", hdrs
+        except Exception as e:
+            raise RuntimeError(f"GET failed {url}: {last_err}; requests:{e}") from e
+
+    def get_conversation(self, conversation_id: str) -> dict[str, Any]:
+        """GET /backend-api/conversation/{id} (JSON or base64 body)."""
+        from .conversation import decode_conversation_payload, normalize_conversation_id
+
+        cid = normalize_conversation_id(conversation_id)
+        url = f"https://chatgpt.com/backend-api/conversation/{cid}"
+        status, body, hdrs = self._get_text(url)
+        if status != 200:
+            raise RuntimeError(
+                f"get_conversation HTTP {status} head={body[:180]!r}"
+            )
+        # HAR sometimes base64-encodes; try decode_conversation_payload either way
+        try:
+            return decode_conversation_payload(body)
+        except ValueError:
+            # content-encoding style: pure base64 in body
+            if "json" in (hdrs.get("content-type") or ""):
+                data = json.loads(body)
+                if isinstance(data, dict):
+                    return data
+            raise
+
+    def list_conversations(
+        self, *, offset: int = 0, limit: int = 28
+    ) -> list[dict[str, Any]]:
+        """Best-effort conversation list; empty list if endpoint shape unknown."""
+        candidates = [
+            (
+                "https://chatgpt.com/backend-api/conversations"
+                f"?offset={offset}&limit={limit}&order=updated"
+            ),
+            (
+                "https://chatgpt.com/backend-api/conversations"
+                f"?offset={offset}&limit={limit}"
+            ),
+        ]
+        for url in candidates:
+            try:
+                status, body, _ = self._get_text(url)
+            except Exception:
+                continue
+            if status != 200 or not body:
+                continue
+            try:
+                data = json.loads(body)
+            except Exception:
+                continue
+            items: list[Any]
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = (
+                    data.get("items")
+                    or data.get("conversations")
+                    or data.get("data")
+                    or []
+                )
+            else:
+                items = []
+            out: list[dict[str, Any]] = []
+            for it in items:
+                if isinstance(it, dict):
+                    out.append(it)
+            if out:
+                return out
+        return []
+
+    def find_conversation_by_voice_session(
+        self, voice_session_id: str, *, max_scan: int = 12
+    ) -> str | None:
+        """Scan recent conversations for a matching voice_session_id in mapping."""
+        from .conversation import extract_voice_turns
+
+        vid = (voice_session_id or "").strip()
+        if not vid:
+            return None
+        items = self.list_conversations(limit=max_scan)
+        for it in items:
+            cid = str(
+                it.get("id")
+                or it.get("conversation_id")
+                or it.get("conversationId")
+                or ""
+            ).strip()
+            if not cid:
+                continue
+            try:
+                conv = self.get_conversation(cid)
+            except Exception:
+                continue
+            for turn in extract_voice_turns(conv):
+                if (turn.get("voice_session_id") or "").upper() == vid.upper():
+                    return str(conv.get("conversation_id") or cid)
+            # also check raw mapping metadata quickly
+            mapping = conv.get("mapping") or {}
+            if isinstance(mapping, dict):
+                blob = json.dumps(mapping)
+                if vid in blob or vid.upper() in blob:
+                    return str(conv.get("conversation_id") or cid)
+        return None
+
+    def mint_realtime(self, sdp_offer: str, session_payload: dict[str, Any]) -> str:
+        self._ensure_token()
 
         files = {
             "sdp": (None, sdp_offer),

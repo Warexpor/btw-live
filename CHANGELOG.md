@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.5.44 — 2026-07-20
+
+### Changed
+
+- **Visualizer transitions:** continuous mode mixes (live / muted / speak / inject) ease every frame — mute wash, nucleus sunset blend, wave colors, meter warn, mute button chrome. Optimistic mute on click/space. Softer level envelopes, longer speak latch, orb-label crossfade, CSS ease on chip/pill/segs/meta.
+
+## 0.5.43 — 2026-07-20
+
+### Changed
+
+- **Visualizer orb calm pulse:** while AI speaks, no tick thrash / jagged histDn contour / sweep flare. Same idle dial; speech only adds a soft ~1–2.5% radius breath and slight core glow.
+
+## 0.5.42 — 2026-07-20
+
+### Fixed
+
+- **Speaker stutter / scratch:** polish path was re-declicking and soft-limiting every 20ms block with a low jump threshold, which smeared real speech into grit and lag. Playback is clean again: hard gain limit only, rare digital-spike kill, no per-block crossfade; output `latency=low`; ring capped ~350ms so jitter backlog cannot pile into multi-second lag; shorter preroll (60ms). Meter disk writes reduced to ~10Hz.
+
+## 0.5.41 — 2026-07-20
+
+### Added
+
+- **ChatGPT conversation bind + resume (C path):** named sessions store `conversation_id` (plus title / last `voice_session_id` / parent). MCP: `btw_session_bind`, `btw_session_fresh`, `btw_session_sync`. Skills for the same.
+- **Hydrate:** on start, `GET /backend-api/conversation/{id}` → ASR turn snip → spoken uplink resume brief (prior voice turns + local pack).
+- **Mint bind:** `/realtime/wm` session JSON includes `conversation_id` when bound (defensive `conversation_mode` fields). On 4xx, retry unbound mint; hydrate still runs. `BTW_NO_CONVERSATION_BIND=1` skips mint fields only.
+- **Discover:** after stop, best-effort scan recent conversations for this leg’s `voice_session_id` and auto-bind if found.
+- **`conversation.py`:** decode dump, extract voice turns, format resume snip; unit fixture + tests.
+
+### Changed
+
+- Status / session list show `resume`, `conversation_short`, title when bound.
+
+## 0.5.40 — 2026-07-20
+
+### Changed
+
+- **Visualizer panel restored** to pre-overhaul deck: top bar, side meters/wave/meta cards, focus mode (not the full-stage singularity dock).
+- **Orb pulse = AI only:** gated on downlink with noise threshold (`AI_THRESH` ~0.12); mic uplink no longer drives the ring. **Mute is my mic only** — ring keeps pulsing when she speaks; mute shows on you-meter + nucleus/label, not as a frozen orange dial.
+
+## 0.5.39 — 2026-07-20
+
+### Changed
+
+- **Boot/top-up inject length:** uplink TTS queue **60s**; spoken boot cap **3200** chars, top-up **1200** (DC plain caps matched). Enough for a ~1 minute dense brief.
+- **Visualizer:** true **circle** orb again (removed elliptical y-squash). **Stars are static** (fixed xy + twinkle only); only thin arc sweeps spin. Concentric circular rings + energy contour.
+
+## 0.5.38 — 2026-07-20
+
+### Fixed
+
+- **Audio cracks (downlink + uplink):** do not hard-zero underruns or pass decode spikes. Speaker path: longer preroll (120ms), hold-decay on underrun, `_declick_join` at block edges, `_soften_intra_clicks` for single-sample glitches. Same join/soft on uplink (inject↔mic). Cannot invent missing OpenAI packets — only smooths our edges.
+- **Boot inject too small:** product path was uplink TTS clipped to **420 chars** of context → ASR bubbles like “Session brief.” / “Cannot edit files.” Spoken brief now carries the real session pack (cap **1600**), speech-normalized; top-up **700**; inject queue **24s** so SAPI can finish.
+
+### Changed
+
+- **Visualizer redesign (xAI-ish):** simpler full-stage singularity (void + white outline + energy accretion ring + dust), thin dock meters, monochrome white pills. More dynamic energy response; less chrome.
+
+## 0.5.37 — 2026-07-20
+
+### Fixed
+
+- **Live mic streaming / barge-in:** uplink no longer waits for a full utterance then dumps it. Root cause was double frame pacing (mic + inject wrapper) plus ring backlog catch-up — speech arrived late as a blob, so Wingman could not interrupt mid-talk like real ChatGPT Live. Now: single 20ms pacer on the outer track, mic `paced=False`, live-edge drop (~60ms), stall resync instead of dump, drain mic ring during TTS inject, `latency=low`.
+
+## 0.5.36 — 2026-07-20
+
+### Fixed
+
+- **Context inject actually reaches Wingman:** plain DC UTF-8 is best-effort only (channel closes in ~100ms; agent ignores it). Product path is short **SAPI TTS on the mic uplink** after PC connects (boot) and on `/btw-topup` (delta). Disable with `BTW_NO_AUDIO_INJECT=1`.
+- **Viz transitions** (idle / muted / talking): soft mode mixes every frame, slower level envelopes, longer speak hysteresis, softer segment fills and chip/label CSS easing — less snap.
+
+## 0.5.35 — 2026-07-20
+
+### Fixed
+
+- **Crash on VC start** after 0.5.32: negotiated empty-label DC `id=0` makes `/realtime/wm` close the whole PeerConnection under aiortc (0 speaker frames). Primary DC is back to named `oai-events` (multi-minute sessions proven). Browser-style negotiated DC only if `BTW_DC_NEGOTIATED=1`.
+- **Boot inject window**: server closes `oai-events` within ~100ms with no inbound; deferred wait missed the send. Default is one plain `channel.send` **immediately on DC open** (still exactly one message). Defer only if `BTW_DC_DEFER_BOOT=1`.
+
+## 0.5.34 — 2026-07-20
+
+### Fixed
+
+- **Top-up** matches boot: exactly one plain-text DC message (`plain_topup_message` / WHAT'S NEW) with the session delta only — not a full re-brief, not multi-frame.
+- Brief caps: boot ≤1800 chars, top-up ≤900 chars (normalize + smart clip) so injects stay small but still give a usable picture.
+
+## 0.5.33 — 2026-07-20
+
+### Fixed
+
+- Boot inject is **exactly one** plain-text structured `channel.send` after VC init (`plain_boot_message`). No multi-entry list, no second send on retry after a successful first send, no double-arm.
+
+## 0.5.32 — 2026-07-20
+
+### Fixed
+
+- Live **context inject DC parity**: open negotiated datachannel `id=0` with empty label (browser Wingman), not named `oai-events`.
+- **Boot plain-text inject deferred** until first inbound DC message or ~0.75s timeout (plus one retry) so send does not race/close the channel on open.
+- Mid-call top-up still one plain-text entry on the same open DC.
+
 ## 0.5.31 — 2026-07-20
 
 ### Fixed

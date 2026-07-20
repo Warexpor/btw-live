@@ -1,0 +1,87 @@
+{
+  "title": "Test voice thread",
+  "conversation_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "current_node": "n3",
+  "voice": "maple",
+  "mapping": {
+    "root": {
+      "id": "root",
+      "parent": null,
+      "children": ["n1"],
+      "message": null
+    },
+    "n1": {
+      "id": "n1",
+      "parent": "root",
+      "children": ["n2"],
+      "message": {
+        "id": "m1",
+        "author": { "role": "user", "name": null, "metadata": {} },
+        "create_time": 1000.0,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "audio_transcription",
+              "text": " Hello there",
+              "direction": "in"
+            }
+          ]
+        },
+        "metadata": {
+          "voice_mode_message": true,
+          "voice_session_id": "VSID-ONE",
+          "parent_id": "root"
+        }
+      }
+    },
+    "n2": {
+      "id": "n2",
+      "parent": "n1",
+      "children": ["n3"],
+      "message": {
+        "id": "m2",
+        "author": { "role": "assistant", "name": null, "metadata": {} },
+        "create_time": 1001.0,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "audio_transcription",
+              "text": " Hi! How can I help?",
+              "direction": "out"
+            }
+          ]
+        },
+        "metadata": {
+          "voice_mode_message": true,
+          "voice_session_id": "VSID-ONE"
+        }
+      }
+    },
+    "n3": {
+      "id": "n3",
+      "parent": "n2",
+      "children": [],
+      "message": {
+        "id": "m3",
+        "author": { "role": "user", "name": null, "metadata": {} },
+        "create_time": 1002.0,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "audio_transcription",
+              "text": " Remember the codeword BANANA",
+              "direction": "in"
+            }
+          ]
+        },
+        "metadata": {
+          "voice_mode_message": true,
+          "voice_session_id": "VSID-TWO"
+        }
+      }
+    }
+  }
+}

@@ -27,6 +27,12 @@ class VoiceSession:
     context: str = ""
     # Empty string = use profile default voice
     voice: str = ""
+    # ChatGPT backend conversation bind (resume / C path)
+    conversation_id: str = ""
+    last_voice_session_id: str = ""
+    parent_message_id: str = ""
+    conversation_title: str = ""
+    conversation_bound_at: float | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     last_used_at: float | None = None
@@ -43,6 +49,11 @@ class VoiceSession:
             profile=str(d.get("profile") or "default"),
             context=str(d.get("context") or ""),
             voice=str(d.get("voice") or ""),
+            conversation_id=str(d.get("conversation_id") or ""),
+            last_voice_session_id=str(d.get("last_voice_session_id") or ""),
+            parent_message_id=str(d.get("parent_message_id") or ""),
+            conversation_title=str(d.get("conversation_title") or ""),
+            conversation_bound_at=d.get("conversation_bound_at"),
             created_at=float(d.get("created_at") or time.time()),
             updated_at=float(d.get("updated_at") or time.time()),
             last_used_at=d.get("last_used_at"),
@@ -88,20 +99,24 @@ def save_store(st: Store) -> None:
     sessions_path().write_text(json.dumps(st.to_dict(), indent=2), encoding="utf-8")
 
 
+def _session_public(s: VoiceSession, *, active_id: str | None) -> dict[str, Any]:
+    d = s.to_dict()
+    d["active"] = s.id == active_id
+    d["context_chars"] = len(s.context or "")
+    d["context_preview"] = (s.context or "")[:120].replace("\n", " ")
+    cid = (s.conversation_id or "").strip()
+    d["resume"] = bool(cid)
+    d["conversation_short"] = (cid[:8] + "…") if len(cid) > 10 else (cid or None)
+    try:
+        d["voice_effective"] = effective_voice(s)
+    except Exception:
+        d["voice_effective"] = s.voice or None
+    return d
+
+
 def list_sessions() -> list[dict[str, Any]]:
     st = load_store()
-    out = []
-    for s in st.sessions:
-        d = s.to_dict()
-        d["active"] = s.id == st.active_id
-        d["context_chars"] = len(s.context or "")
-        d["context_preview"] = (s.context or "")[:120].replace("\n", " ")
-        try:
-            d["voice_effective"] = effective_voice(s)
-        except Exception:
-            d["voice_effective"] = s.voice or None
-        out.append(d)
-    return out
+    return [_session_public(s, active_id=st.active_id) for s in st.sessions]
 
 
 def get_active() -> VoiceSession:
@@ -195,6 +210,11 @@ def update_active(
     notes: str | None = None,
     name: str | None = None,
     voice: str | None = None,
+    conversation_id: str | None = None,
+    last_voice_session_id: str | None = None,
+    parent_message_id: str | None = None,
+    conversation_title: str | None = None,
+    conversation_bound_at: float | None = ...,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     from .voices import normalize_voice
 
@@ -218,12 +238,58 @@ def update_active(
         if voice is not None:
             # empty string clears override → profile default
             x.voice = "" if not str(voice).strip() else normalize_voice(voice)
+        if conversation_id is not None:
+            x.conversation_id = (conversation_id or "").strip()
+        if last_voice_session_id is not None:
+            x.last_voice_session_id = (last_voice_session_id or "").strip()
+        if parent_message_id is not None:
+            x.parent_message_id = (parent_message_id or "").strip()
+        if conversation_title is not None:
+            x.conversation_title = (conversation_title or "").strip()
+        if conversation_bound_at is not ...:
+            x.conversation_bound_at = conversation_bound_at
         x.updated_at = time.time()
         st.sessions[i] = x
         save_store(st)
         _sync_active_files(x)
         return x.to_dict()
     raise RuntimeError("active session missing")
+
+
+def bind_active_conversation(
+    conversation_id: str,
+    *,
+    title: str = "",
+    parent_message_id: str = "",
+    last_voice_session_id: str | None = None,
+) -> dict[str, Any]:
+    from .conversation import normalize_conversation_id
+
+    cid = normalize_conversation_id(conversation_id)
+    kwargs: dict[str, Any] = {
+        "conversation_id": cid,
+        "conversation_title": title or "",
+        "parent_message_id": parent_message_id or "",
+        "conversation_bound_at": time.time(),
+    }
+    if last_voice_session_id is not None:
+        kwargs["last_voice_session_id"] = last_voice_session_id
+    return update_active(**kwargs)
+
+
+def clear_active_conversation() -> dict[str, Any]:
+    """Drop ChatGPT bind; keep local pack/profile/voice."""
+    return update_active(
+        conversation_id="",
+        parent_message_id="",
+        conversation_title="",
+        last_voice_session_id="",
+        conversation_bound_at=None,
+    )
+
+
+def set_last_voice_session(voice_session_id: str) -> dict[str, Any]:
+    return update_active(last_voice_session_id=(voice_session_id or "").strip())
 
 
 def effective_voice(session: VoiceSession | None = None) -> str:
@@ -255,6 +321,7 @@ def _sync_active_files(s: VoiceSession) -> None:
     prof = load_profile(s.profile)
     instructions = prof.assemble_instructions(s.context or "")
     (data_dir() / "instructions.txt").write_text(instructions, encoding="utf-8")
+    cid = (s.conversation_id or "").strip()
     (data_dir() / "active_session.json").write_text(
         json.dumps(
             {
@@ -263,6 +330,10 @@ def _sync_active_files(s: VoiceSession) -> None:
                 "profile": s.profile,
                 "context_chars": len(s.context or ""),
                 "profiles_available": list_profiles(),
+                "conversation_id": cid or None,
+                "resume": bool(cid),
+                "conversation_title": s.conversation_title or None,
+                "last_voice_session_id": s.last_voice_session_id or None,
             },
             indent=2,
         ),

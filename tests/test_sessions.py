@@ -8,7 +8,11 @@ from btw.session_json import (  # noqa: E402
     instruction_events,
     context_push_events,
     plain_boot_entries,
+    plain_boot_message,
     plain_topup_entry,
+    plain_topup_message,
+    PLAIN_BOOT_MAX,
+    PLAIN_TOPUP_MAX,
 )
 
 
@@ -35,18 +39,39 @@ def test_session_crud(tmp_path, monkeypatch):
     assert "beta" not in names
 
 
-def test_plain_boot_entries_are_single_compact():
+def test_plain_boot_is_single_structured_message():
+    msg = plain_boot_message(
+        "You are a debugger.\n\n## Current Grok session context\nFixed spawn.",
+        "Fixed spawn.\n\nMic OK.",
+    )
+    assert isinstance(msg, str)
+    assert msg.count("[BTW-VC SESSION BRIEF") == 1
+    assert "Fixed spawn" in msg
+    assert len(msg) <= PLAIN_BOOT_MAX + 20  # clip marker margin
     entries = plain_boot_entries(
         "You are a debugger.\n\n## Current Grok session context\nFixed spawn.",
         "Fixed spawn.\n\nMic OK.",
     )
     assert len(entries) == 1
-    assert isinstance(entries[0], str)
-    assert "SESSION BRIEF" in entries[0]
-    assert "debugger" in entries[0]
-    top = plain_topup_entry("new fact")
-    assert top.startswith("[BTW-VC CONTEXT UPDATE")
-    assert "new fact" in top
+    assert entries[0] == msg
+
+
+def test_plain_topup_is_single_whats_new():
+    top = plain_topup_message("Meters fixed; testing negotiated DC inject.")
+    assert top.count("[BTW-VC WHAT'S NEW]") == 1
+    assert "Meters fixed" in top
+    assert "Merge into prior" in top
+    assert len(top) <= PLAIN_TOPUP_MAX + 20
+    # compat alias
+    assert plain_topup_entry("x") == plain_topup_message("x")
+    assert plain_topup_message("   ") == ""
+
+
+def test_plain_topup_clips_long_delta():
+    huge = "fact line " * 200
+    top = plain_topup_message(huge)
+    assert len(top) <= PLAIN_TOPUP_MAX + 20
+    assert top.startswith("[BTW-VC WHAT'S NEW]")
 
 
 def test_instruction_events_legacy_realtime():

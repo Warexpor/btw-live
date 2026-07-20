@@ -84,12 +84,27 @@ Plan in this capture: `plan_type=free` (still got Live/wingman).
 | `POST /backend-api/sentinel/heartbeat` | sentinel keepalive |
 | `POST /ces/*` | analytics only |
 
+## Conversation bind + resume (btw 0.5.41+)
+
+Live turns land in a real backend conversation (sidebar chat) with:
+
+- `GET /backend-api/conversation/{id}` — full mapping; messages carry `metadata.voice_session_id` and `audio_transcription` parts.
+- Product resume = same chat → Live again. **Key is `conversation_id`**, not one sticky Live UUID.
+
+btw named sessions store `conversation_id`. On start:
+
+1. Hydrate: GET conversation → ordered you/ai snip → uplink TTS resume brief.
+2. Mint: session JSON may include top-level `conversation_id` and `conversation_mode.conversation_id` / `id` (defensive; exact field set not fully captured for “resume Live” HAR yet). Retry mint without bind fields on failure.
+3. Each Live leg still uses a **new** `voice_session_id`; conversation is the long-lived thread.
+4. After stop: optional scan of recent conversations for `voice_session_id` → auto-bind.
+5. Tools: `btw_session_bind` / `fresh` / `sync`. Env `BTW_NO_CONVERSATION_BIND=1` disables mint bind only.
+
 ## Implementation implications
 
 1. **Mint path is clear:** build WebRTC offer → multipart POST `/realtime/wm` → set remote SDP → ICE → audio + datachannel.
 2. **Auth path is not bare-HTTP friendly:** same cookies get **CF 403** from Python; need browser/CDP TLS context or full CF clearance.
-3. **Datachannel** likely carries events (transcripts, tool/state) — not reverse-engineered yet (media not in HAR). Capture next with `chrome://webrtc-internals` or CDP WebRTC stats / DC messages.
-4. **Grok `/btw-vc` (standalone):** local aiortc + HTTP mint; system prompt via datachannel; optional headless token harvest only if CF blocks curl_cffi. See `src/btw/live_session.py`.
+3. **Datachannel** (browser JS, 2026-07-20 HAR assets): `createDataChannel("", {negotiated:true, id:0})` — empty label, negotiated id **0**. HAR never records DC payloads; use a console hook on `RTCDataChannel.send` for frames.
+4. **Grok `/btw-vc` (standalone):** local aiortc + HTTP mint; **primary DC = `oai-events`**. Product context inject is **uplink TTS** after PC connected (plain DC is best-effort only — Wingman does not treat plain UTF-8 as session facts). `BTW_NO_AUDIO_INJECT=1` to disable. Optional headless token harvest if CF blocks curl_cffi. See `src/btw/live_session.py`.
 5. **Docs:** public framing in `docs/SAFE_DOCS.md` / root README.
 
 ## Local artifacts (gitignored)

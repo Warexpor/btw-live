@@ -80,6 +80,25 @@ TOOLS = [
         },
     },
     {
+        "name": "btw_session_bind",
+        "description": "Bind active /btw-vc session to a ChatGPT conversation_id (uuid or chatgpt.com URL). Next start resumes that thread.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"conversation_id": {"type": "string"}},
+            "required": ["conversation_id"],
+        },
+    },
+    {
+        "name": "btw_session_fresh",
+        "description": "Clear ChatGPT conversation bind on active session (keep local pack). Next start is unbound.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_session_sync",
+        "description": "Fetch bound ChatGPT conversation (title, turn preview, resume snip). No Live start.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "btw_set_profile",
         "description": "Set profile on active session (default|debugger|architect).",
         "inputSchema": {
@@ -207,6 +226,12 @@ def handle_tool(name: str, args: dict) -> dict:
             return _ok(service.session_use(args["id_or_name"]))
         if name == "btw_session_delete":
             return _ok(service.session_delete(args["id_or_name"]))
+        if name == "btw_session_bind":
+            return _ok(service.session_bind(args["conversation_id"]))
+        if name == "btw_session_fresh":
+            return _ok(service.session_fresh())
+        if name == "btw_session_sync":
+            return _ok(service.session_sync())
         if name == "btw_set_profile":
             return _ok(service.set_profile(args["name"]))
         if name == "btw_push_context":
