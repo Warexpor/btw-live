@@ -19,7 +19,8 @@ Separate Live voice channel. Not the coding agent.
 
 | User | Tools |
 |------|--------|
-| `/btw-vc` start | `btw_status` → optional `btw_push_context` → `btw_start` |
+| `/btw-vc` start | `btw_status` → optional `btw_push_context` → `btw_start` (opens visualizer) |
+| `/btw-viz` | `btw_viz` — levels GUI |
 | stop | `btw_stop` |
 | `/btw-mute` · `/btw-unmute` | `btw_mute` / `btw_unmute` |
 | `/btw-sessions` | `btw_session_list` |
@@ -36,8 +37,8 @@ Separate Live voice channel. Not the coding agent.
 1. Cookies ok (`btw_status`).
 2. Active session + profile correct.
 3. Context snip if useful (≤4–6k).
-4. `btw_start`.
-5. One short confirm: live / muted / session name. No secrets.
+4. `btw_start` (auto-opens visualizer unless `BTW_NO_VIZ`).
+5. One short confirm: live / muted / session name / viz. No secrets.
 
 ## Rules
 

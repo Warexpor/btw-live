@@ -11,7 +11,15 @@ from .control import push_command, status_live_path
 from .paths import data_dir
 from .profiles import list_profiles, load_profile
 from .runtime import doctor as runtime_doctor
-from .runtime import start_background, stop_runtime, _pid_running, log_path
+from .runtime import (
+    start_background,
+    start_viz,
+    stop_runtime,
+    stop_viz,
+    _pid_running,
+    _viz_pid_running,
+    log_path,
+)
 from .session_json import build_voice_session_payload, instruction_events
 from .state import (
     load_state,
@@ -67,6 +75,7 @@ def status() -> dict[str, Any]:
         "cookies_ok": cookie_ok,
         "cookies_error": cookie_err,
         "runtime_pid_running": running,
+        "viz_running": _viz_pid_running(),
         "muted": bool(st.muted or (live or {}).get("muted")),
         "live": live,
         "data_dir": str(data_dir()),
@@ -311,8 +320,21 @@ def start(
         "instructions_chars": prep.get("instructions_chars"),
         "muted": muted,
         "runtime": spawn,
-        "hint": "Speak on mic. Mute: btw_mute. Stop: btw_stop / /btw-vc stop.",
+        "viz": spawn.get("viz"),
+        "hint": "Speak on mic. Visualizer opens with Live. Mute: btw_mute. Stop: btw_stop.",
     }
+
+
+def open_viz() -> dict[str, Any]:
+    """Open (or re-open) the voice visualizer GUI."""
+    out = start_viz(force=False)
+    if out.get("already"):
+        return {**out, "message": "visualizer already open"}
+    return {**out, "message": "visualizer launched" if out.get("ok") else out.get("error")}
+
+
+def close_viz() -> dict[str, Any]:
+    return stop_viz()
 
 
 def stop() -> dict[str, Any]:

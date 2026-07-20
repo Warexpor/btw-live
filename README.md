@@ -20,6 +20,7 @@ See [docs/SAFE_DOCS.md](docs/SAFE_DOCS.md) for how we write docs going forward.
 | Voice | Speak voice id at mint (e.g. maple) |
 | Context | Profile + short pack; spoken uplink brief (DC text best-effort) |
 | `/btw-topup` | Mid-call curated fact snip (append + speak delta) |
+| `/btw-viz` | Second-monitor live surface (WebView UI, levels + mute/stop) |
 
 Not a second coding agent. Side channel only.
 
@@ -49,6 +50,7 @@ Or `/btw-cookies` (never commit that file).
 | `/btw-stop` | end call |
 | `/btw-mute` / `/btw-unmute` | mic |
 | `/btw-topup` | mid-call context snip |
+| `/btw-viz` | voice visualizer GUI |
 | `/btw-sessions` / `session-new` / `use` / `delete` | packs |
 | `/btw-voice` | list/set speak voice |
 | `/btw-cookies` | import or clear local cookies |
@@ -69,6 +71,10 @@ python -m btw.runtime stop
 - Session context is spoken as a short audio brief; datachannel text inject is best-effort.
 - Not full ChatGPT UI feature parity (widgets, etc.).
 - Cookies = full account access — treat as secrets.
+
+## Roadmap
+
+Product ideas (visualizer GUI, PTT, scene packs, etc.): [docs/FEATURE_BACKLOG.md](docs/FEATURE_BACKLOG.md).
 
 ## Dev
 

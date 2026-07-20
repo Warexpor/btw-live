@@ -117,6 +117,136 @@ def _pid_running() -> bool:
         return False
 
 
+def _viz_pid_running() -> bool:
+    from .control import viz_pid_path
+
+    p = viz_pid_path()
+    if not p.is_file():
+        return False
+    try:
+        pid = int(p.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(0x1000, 0, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def stop_viz() -> dict[str, Any]:
+    from .control import viz_pid_path
+
+    killed = False
+    p = viz_pid_path()
+    if p.is_file():
+        try:
+            pid = int(p.read_text(encoding="utf-8").strip())
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                os.kill(pid, signal.SIGTERM)
+            killed = True
+        except Exception as e:
+            _log(f"viz stop err: {e}")
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return {"ok": True, "killed": killed}
+
+
+def start_viz(*, force: bool = False) -> dict[str, Any]:
+    """Spawn the voice visualizer GUI (separate process — Live is often headless)."""
+    if os.environ.get("BTW_NO_VIZ", "").strip() in ("1", "true", "yes"):
+        return {"ok": False, "skipped": True, "reason": "BTW_NO_VIZ"}
+    if _viz_pid_running() and not force:
+        from .control import viz_pid_path
+
+        try:
+            pid = int(viz_pid_path().read_text(encoding="utf-8").strip())
+        except Exception:
+            pid = None
+        return {"ok": True, "already": True, "pid": pid}
+
+    if force:
+        stop_viz()
+
+    try:
+        py = python_exe()
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+
+    # Use console python for viz (pythonw hid webview errors → silent tk fallback).
+    launch_py = py
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(plugin_root() / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONUNBUFFERED"] = "1"
+    env["BTW_PYTHON"] = py
+    # never force tk from spawn unless user asked
+    env.pop("BTW_VIZ_TK", None)
+    cmd = [launch_py, "-u", "-m", "btw.viz"]
+    if os.environ.get("BTW_VIZ_DEMO", "").strip() in ("1", "true", "yes"):
+        cmd.append("--demo")
+    if os.environ.get("BTW_VIZ_TK", "").strip() in ("1", "true", "yes"):
+        cmd.append("--tk")
+    data_dir().mkdir(parents=True, exist_ok=True)
+    viz_log = data_dir() / "viz.log"
+
+    try:
+        logf = viz_log.open("a", encoding="utf-8", buffering=1)
+        logf.write(f"\n--- viz spawn py={launch_py} ---\n")
+        logf.flush()
+        if sys.platform == "win32":
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(plugin_root()),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                close_fds=False,
+            )
+        else:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(plugin_root()),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    from .control import viz_pid_path
+
+    try:
+        viz_pid_path().write_text(str(proc.pid), encoding="utf-8")
+    except Exception:
+        pass
+    return {"ok": True, "pid": proc.pid, "python": launch_py}
+
+
 def stop_runtime() -> dict[str, Any]:
     st = load_state()
     killed = False
@@ -150,7 +280,13 @@ def stop_runtime() -> dict[str, Any]:
         )
     except Exception as e:
         _log(f"live_status clear: {e}")
-    return {"ok": True, "killed": killed, "state": load_state().to_dict()}
+    viz_out = stop_viz()
+    return {
+        "ok": True,
+        "killed": killed,
+        "viz_killed": viz_out.get("killed"),
+        "state": load_state().to_dict(),
+    }
 
 
 def _load_instructions(profile_name: str) -> tuple[Any, str]:
@@ -308,12 +444,14 @@ def start_background(
     st.muted = bool(muted)
     st.notes = [f"pid={proc.pid}", "mode=standalone"]
     save_state(st)
+    viz = start_viz()
     return {
         "ok": True,
         "pid": proc.pid,
         "log": str(log_path()),
         "profile": profile or st.profile,
         "mode": "standalone",
+        "viz": viz,
         "message": "standalone Live runtime spawned — mic/speakers on this machine",
     }
 
@@ -329,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--no-mic", action="store_true")
     p_run.add_argument("--muted", action="store_true")
     p_run.add_argument("--seconds", type=float, default=None)
+    p_run.add_argument("--no-viz", action="store_true", help="do not open visualizer")
 
     p_start = sub.add_parser("start", help="background Live session")
     p_start.add_argument("--profile", default=None)
@@ -337,10 +476,15 @@ def main(argv: list[str] | None = None) -> int:
     p_start.add_argument("--no-mic", action="store_true")
     p_start.add_argument("--muted", action="store_true")
     p_start.add_argument("--seconds", type=float, default=None)
+    p_start.add_argument("--no-viz", action="store_true", help="do not open visualizer")
 
     sub.add_parser("stop")
     sub.add_parser("doctor")
     sub.add_parser("mint-smoke", help="auth+mint+8s silent connect")
+    p_viz = sub.add_parser("viz", help="open live surface (WebView)")
+    p_viz.add_argument("--demo", action="store_true", help="animate shell without Live")
+    p_viz.add_argument("--tk", action="store_true", help="force tkinter fallback")
+    sub.add_parser("viz-stop", help="close live surface")
 
     args = ap.parse_args(argv)
 
@@ -350,12 +494,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "stop":
         print(json.dumps(stop_runtime(), indent=2))
         return 0
+    if args.cmd == "viz":
+        if args.demo:
+            os.environ["BTW_VIZ_DEMO"] = "1"
+        if args.tk:
+            os.environ["BTW_VIZ_TK"] = "1"
+        print(json.dumps(start_viz(force=True), indent=2))
+        return 0
+    if args.cmd == "viz-stop":
+        print(json.dumps(stop_viz(), indent=2))
+        return 0
     if args.cmd == "mint-smoke":
         pid_path().write_text(str(os.getpid()), encoding="utf-8")
         out = mint_smoke()
         print(json.dumps(out, indent=2, default=str))
         return 0 if out.get("ok") else 1
     if args.cmd == "start":
+        if args.no_viz:
+            os.environ["BTW_NO_VIZ"] = "1"
         print(
             json.dumps(
                 start_background(
@@ -372,6 +528,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "run":
         pid_path().write_text(str(os.getpid()), encoding="utf-8")
+        if not args.no_viz:
+            start_viz()
         out = start_foreground(
             args.profile,
             use_mic=not args.no_mic,
@@ -380,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
             session_name=args.session_name or "default",
             voice=args.voice,
         )
+        stop_viz()
         print(json.dumps(out, indent=2, default=str))
         return 0 if out.get("ok") else 1
     return 2

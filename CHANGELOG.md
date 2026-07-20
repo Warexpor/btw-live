@@ -1,5 +1,102 @@
 # Changelog
 
+## 0.5.25 — 2026-07-20
+
+### Changed
+
+- App icon: rebuilt ring-dial asset set; set via `webview.start(icon=...)` (correct pywebview 6 API) so Windows shows the real icon instead of default Python.
+
+## 0.5.24 — 2026-07-20
+
+### Fixed
+
+- Live surface was silently falling back to **tkinter** because pywebview rejected `icon=` on `create_window`. WebView path restored; errors go to `viz.log`; no silent tk unless `BTW_VIZ_ALLOW_TK=1`.
+
+## 0.5.23 — 2026-07-20
+
+### Added
+
+- App icon: code-drawn ring-dial (`assets/icon.png` / `icon.ico`), wired into the live surface window.
+
+## 0.5.22 — 2026-07-20
+
+### Added
+
+- **Focus / Deck** view toggle: full chrome vs visualizer-only (button, hover **Deck** exit, `F` key; remembers in localStorage).
+
+### Changed
+
+- Restored rich **idle** dial; speech only gently lengthens ticks / core (no curve/dot storm).
+
+## 0.5.21 — 2026-07-20
+
+### Changed
+
+- Viz speech mode desaturated: dropped spark dots + wild polar squiggles; speech only lengthens ticks / softens core glow (idle dial look preserved).
+
+## 0.5.20 — 2026-07-20
+
+### Changed
+
+- Viz reactor restored to **full ring energy** (layered rings, dual tick fields, dual polar waves, triple arcs, sparks) while keeping the clean starfield (no petal dust).
+- Idle dial still breathes/spins lightly so it doesn’t look dead.
+
+## 0.5.19 — 2026-07-20
+
+### Fixed
+
+- Viz: removed oversized solid dust ellipses (looked like gray petals over the reactor).
+- Idle instrument cleaner: concentric guides + outer ticks only; polar waves only when signal present.
+- Softer starfield/nebula washes; no double CSS blob layer fighting the canvas.
+
+## 0.5.18 — 2026-07-20
+
+### Changed
+
+- Viz pane: **cosmic void** backdrop — parallax starfield, faint dusk/breeze nebulae, dust, vignette; reactor sits in full-pane canvas.
+- Still monochrome-first (xAI accents only as whisper washes).
+
+## 0.5.17 — 2026-07-20
+
+### Changed
+
+- Live surface **horizontal desktop layout** (~1080×420) for second-monitor parking.
+- Removed film-grain noise layer; cleaner void canvas.
+- **Ring-reactor** visualizer: radial tick spectrum, dual polar waveforms, orbiting arcs, spark satellites.
+- While she speaks: chrome text fades (label / detail meta / hint) so the viz dominates.
+- Slim top bar + compact meta strip (less label clutter).
+
+## 0.5.16 — 2026-07-20
+
+### Changed
+
+- Live surface is now a **WebView2 / pywebview** app (HTML/CSS/JS): modern orb, spectrum, TRACE, telemetry; Python bridge for meters + mute/stop.
+- `python -m btw.viz --demo` animates the shell without Live.
+- tkinter UI kept as fallback (`BTW_VIZ_TK=1` or if pywebview missing).
+
+## 0.5.15 — 2026-07-20
+
+### Changed
+
+- Visualizer redesigned as **second-monitor live surface** in xAI dark language: void canvas, hairline cards, pill controls, hero orb with ring pulse, segmented spectrum meters, dual waveform trace, full telemetry grid, keyboard shortcuts (SPACE mute, ESC end). Stays open after call ends for parking on a side display.
+
+## 0.5.14 — 2026-07-20
+
+### Added
+
+- **Voice visualizer GUI** (`btw.viz` / `/btw-viz`): dual level bars, talking orb, session/voice chips, mute·unmute·stop.
+- High-rate `meters.json` (~20 Hz) with `uplink_peak`, `downlink_peak`, `injecting`.
+- Speaker downlink peak for “is she talking” UI.
+- Auto-open visualizer on Live start; `BTW_NO_VIZ=1` or `--no-viz` to skip.
+- MCP `btw_viz` / `btw_viz_close`; CLI `python -m btw.runtime viz`.
+
+## 0.5.13 — 2026-07-20
+
+### Added
+
+- `docs/FEATURE_BACKLOG.md` — concrete product todo list (voice visualizer GUI, PTT, scene packs, auto-topup, etc.).
+- README pointer under Roadmap.
+
 ## 0.5.12 — 2026-07-20
 
 ### Fixed

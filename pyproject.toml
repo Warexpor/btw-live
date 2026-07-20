@@ -1,6 +1,6 @@
 [project]
 name = "btw-live"
-version = "0.5.12"
+version = "0.5.25"
 description = "ChatGPT Live /btw side session for Grok Build (standalone)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -11,6 +11,7 @@ dependencies = [
   "av>=12",
   "sounddevice>=0.4",
   "numpy>=1.24",
+  "pywebview>=5.0",
 ]
 
 [project.optional-dependencies]
@@ -27,5 +28,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+btw = ["viz_ui/*", "assets/*"]
 
 

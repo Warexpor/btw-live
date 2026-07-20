@@ -169,6 +169,16 @@ TOOLS = [
         "description": "Remove stored ChatGPT cookies and token cache (local logout).",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "btw_viz",
+        "description": "Open the /btw-vc voice visualizer GUI (levels + mute/stop).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "btw_viz_close",
+        "description": "Close the voice visualizer window.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -229,6 +239,10 @@ def handle_tool(name: str, args: dict) -> dict:
             return _ok(service.import_cookies(args["cookie_header"]))
         if name == "btw_clear_cookies":
             return _ok(service.clear_cookies())
+        if name == "btw_viz":
+            return _ok(service.open_viz())
+        if name == "btw_viz_close":
+            return _ok(service.close_viz())
         return _err(f"unknown tool {name}")
     except Exception as e:
         return _err(f"{type(e).__name__}: {e}")

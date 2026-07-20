@@ -266,6 +266,7 @@ class SpeakerPlayer:
         self._ready = False
         self._out_channels = 2
         self._frames_in = 0
+        self.last_peak = 0.0  # pre-gain mono peak for visualizer
 
     def start(self) -> None:
         try:
@@ -332,6 +333,8 @@ class SpeakerPlayer:
             peak = float(np.max(np.abs(mono)))
             if peak > 0.99 and self._frames_in < 5:
                 continue
+            # Hold peak briefly so the GUI bar doesn't drop between packets
+            self.last_peak = max(peak, float(self.last_peak) * 0.82)
             mono = _limit(mono, gain=self._gain, peak=SPEAKER_PEAK_LIMIT)
             self._ring.write(mono)
             self._frames_in += 1
@@ -340,6 +343,7 @@ class SpeakerPlayer:
 
     def stop(self) -> None:
         self._ready = False
+        self.last_peak = 0.0
         self._ring.clear()
         if self._stream is not None:
             try:

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>btw · live surface</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="bar">
+      <div class="brand-row">
+        <span class="wordmark">btw</span>
+        <span class="sep" aria-hidden="true"></span>
+        <span class="eyebrow">live</span>
+        <span id="statusChip" class="chip chip-idle">idle</span>
+      </div>
+      <div class="actions">
+        <button type="button" class="pill pill-ghost" id="btnView" title="Focus: viz only">Focus</button>
+        <button type="button" class="pill" id="btnMute">Mute</button>
+        <button type="button" class="pill pill-ghost" id="btnStop">End</button>
+      </div>
+    </header>
+
+    <main class="stage">
+      <aside class="viz-pane">
+        <canvas id="orb" width="360" height="360"></canvas>
+        <div class="orb-label" id="orbLabel">waiting</div>
+        <!-- always available in focus mode -->
+        <button type="button" class="focus-exit" id="btnViewExit" title="Back to deck">Deck</button>
+      </aside>
+
+      <section class="side" id="sidePanel">
+        <div class="card meters">
+          <div class="meter">
+            <div class="meter-head">
+              <span class="label">you</span>
+              <span class="pct" id="upPct">0%</span>
+            </div>
+            <div class="seg-track" id="upTrack"></div>
+          </div>
+          <div class="meter">
+            <div class="meter-head">
+              <span class="label">ai</span>
+              <span class="pct" id="dnPct">0%</span>
+            </div>
+            <div class="seg-track" id="dnTrack"></div>
+          </div>
+        </div>
+
+        <div class="card wave-card">
+          <canvas id="wave" height="72"></canvas>
+        </div>
+
+        <div class="meta-strip" id="metaStrip">
+          <div class="meta-item"><span class="k">session</span><span class="v" data-k="session">—</span></div>
+          <div class="meta-item"><span class="k">voice</span><span class="v" data-k="voice">—</span></div>
+          <div class="meta-item"><span class="k">mic</span><span class="v" data-k="mic">—</span></div>
+          <div class="meta-item meta-detail"><span class="k">profile</span><span class="v" data-k="profile">—</span></div>
+          <div class="meta-item meta-detail"><span class="k">link</span><span class="v" data-k="link">—</span></div>
+          <div class="meta-item meta-detail"><span class="k">ch</span><span class="v" data-k="channel">—</span></div>
+        </div>
+
+        <p class="hint" id="hint">space mute · esc end</p>
+      </section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

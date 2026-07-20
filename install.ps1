@@ -44,7 +44,7 @@ function Ensure-BtwVenv {
         & $venvPy -m pip install -U pip -q
         & $venvPy -m pip install -e $Root -q
     }
-    & $venvPy -c "import aiortc,sounddevice,av,curl_cffi,numpy; from btw.version import __version__; print('venv ok', __version__)"
+    & $venvPy -c "import aiortc,sounddevice,av,curl_cffi,numpy,webview; from btw.version import __version__; print('venv ok', __version__)"
     return $venvPy
 }
 

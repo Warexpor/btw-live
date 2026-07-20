@@ -27,7 +27,7 @@ from .audio_io import (
     SpeakerPlayer,
     synthesize_speech_wav,
 )
-from .control import drain_commands, write_live_status
+from .control import drain_commands, write_live_status, write_meters
 from .http_client import ChatGPTClient
 from .paths import data_dir
 from .profiles import SessionProfile, load_profile
@@ -134,37 +134,67 @@ class LiveSession:
         _log(f"mic muted={self._muted}")
         self._publish_status()
 
+    def _meter_snapshot(self) -> dict[str, Any]:
+        up = (
+            float(getattr(self.mic_track, "last_peak", 0.0) or 0.0)
+            if self.mic_track
+            else 0.0
+        )
+        down = 0.0
+        if self.speaker is not None:
+            down = float(getattr(self.speaker, "last_peak", 0.0) or 0.0)
+            # Decay when no remote frames arrive (push_frame holds peak up)
+            try:
+                self.speaker.last_peak = down * 0.88
+            except Exception:
+                pass
+        injecting = False
+        uplink_src = None
+        mic_frames = 0
+        if self.mic_track is not None:
+            uplink_src = getattr(self.mic_track, "_source", None)
+            mic_frames = int(getattr(self.mic_track, "mic_frames", 0) or 0)
+            try:
+                injecting = (
+                    self.mic_track.inject_queue_samples() > 0
+                    or str(uplink_src or "") == "inject"
+                )
+            except Exception:
+                injecting = str(uplink_src or "") == "inject"
+        live = bool(self.pc and not self._closed.is_set())
+        return {
+            "status": "live" if live else "idle",
+            "session_name": self.session_name,
+            "profile": self.profile.name,
+            "voice": self.voice,
+            "muted": self._muted,
+            "injecting": injecting,
+            "uplink_peak": up,
+            "downlink_peak": down,
+            "uplink_src": uplink_src,
+            "mic_frames": mic_frames,
+            "pc": self.stats.get("pc_state"),
+            "ice": self.stats.get("ice_state"),
+            "dc_open": bool(self.stats.get("dc_open")),
+            "audio_injects": self.stats.get("audio_injects", 0),
+            "last_audio_inject": self.stats.get("last_audio_inject"),
+        }
+
+    def _publish_meters(self) -> None:
+        write_meters(self._meter_snapshot())
+
     def _publish_status(self) -> None:
+        snap = self._meter_snapshot()
         write_live_status(
             {
-                "status": "live" if self.pc and not self._closed.is_set() else "idle",
-                "session_name": self.session_name,
-                "profile": self.profile.name,
-                "voice": self.voice,
+                **snap,
                 "voice_session_id": self.voice_session_id,
-                "muted": self._muted,
-                "pc": self.stats.get("pc_state"),
-                "ice": self.stats.get("ice_state"),
                 "mic": self.stats.get("mic"),
                 "instructions_chars": len(self.instructions or ""),
                 "context_chars": len(self.context or ""),
-                "dc_open": bool(self.stats.get("dc_open")),
-                "audio_injects": self.stats.get("audio_injects", 0),
-                "uplink_peak": (
-                    float(getattr(self.mic_track, "last_peak", 0.0) or 0.0)
-                    if self.mic_track
-                    else 0.0
-                ),
-                "uplink_src": (
-                    getattr(self.mic_track, "_source", None) if self.mic_track else None
-                ),
-                "mic_frames": (
-                    int(getattr(self.mic_track, "mic_frames", 0) or 0)
-                    if self.mic_track
-                    else 0
-                ),
             }
         )
+        write_meters(snap)
 
     def _append_inbox(self, direction: str, text: str, meta: dict[str, Any] | None = None) -> None:
         rec = {"ts": time.time(), "dir": direction, "text": text[:8000], **(meta or {})}
@@ -473,10 +503,11 @@ class LiveSession:
                 elif cmd == "set_muted":
                     self.set_muted(bool(rec.get("muted")))
             ticks += 1
-            # refresh uplink peak for status ~every 2s
-            if ticks % 8 == 0:
+            # ~20 Hz meters for visualizer; full status ~2s
+            self._publish_meters()
+            if ticks % 40 == 0:
                 self._publish_status()
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.05)
 
     async def run_until_stopped(self, seconds: Optional[float] = None) -> dict[str, Any]:
         ctrl = asyncio.create_task(self._control_loop())
@@ -518,13 +549,19 @@ class LiveSession:
                 pass
             self.pc = None
         self._closed.set()
-        write_live_status(
-            {
-                "status": "stopped",
-                "session_name": self.session_name,
-                "audio_injects": self.stats.get("audio_injects"),
-            }
-        )
+        stopped = {
+            "status": "stopped",
+            "session_name": self.session_name,
+            "profile": self.profile.name,
+            "voice": self.voice,
+            "muted": self._muted,
+            "injecting": False,
+            "uplink_peak": 0.0,
+            "downlink_peak": 0.0,
+            "audio_injects": self.stats.get("audio_injects"),
+        }
+        write_live_status(stopped)
+        write_meters(stopped)
         _log("session stopped")
 
 

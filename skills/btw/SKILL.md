@@ -22,5 +22,6 @@ description: btw hub for Grok Build. Voice Live is /btw-vc — use that skill fo
 | `/btw-cookies` | swap/clear ChatGPT cookies |
 | `/btw-status` | btw-status |
 | `/btw-doctor` | btw-doctor |
+| `/btw-viz` | voice visualizer GUI |
 
 If user only said `/btw`, point them to `/btw-vc` in ≤5 lines.
